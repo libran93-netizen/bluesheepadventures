@@ -1,16 +1,18 @@
 "use client";
 
+// Thin client of /api/chat — the server owns the state machine, metering
+// and validation. This component renders messages and relays turns.
+
 import React, { useState, useEffect, useRef } from "react";
 import { X, Send, Sparkles, ShieldCheck, Info } from "lucide-react";
-import ItineraryCard from "./ItineraryCard";
+import ItineraryCard, { ItineraryPayload } from "./ItineraryCard";
 import PaywallModal from "./PaywallModal";
 
 interface Message {
   id: string;
   sender: "user" | "ai";
   text: string;
-  isItinerary?: boolean;
-  itineraryData?: any;
+  itinerary?: ItineraryPayload;
 }
 
 interface ChatPanelProps {
@@ -20,443 +22,274 @@ interface ChatPanelProps {
   initialMessage?: string;
 }
 
-type ChatStep = "name" | "phone" | "email" | "chatting";
+type ServerState = "ASK_NAME" | "ASK_PHONE" | "ASK_EMAIL" | "FREE_CHAT" | "PAYWALLED";
 
-export default function ChatPanel({ isOpen, onClose, initialDestination, initialMessage }: ChatPanelProps) {
-  const [step, setStep] = useState<ChatStep>("name");
+const GREETING =
+  "Hi! I'm your Himalayan trek planning expert from Blue Sheep Adventures. Let's design your trek — first, what's your name?";
+
+export default function ChatPanel({ isOpen, onClose, initialMessage }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
-  const [freeMessagesLeft, setFreeMessagesLeft] = useState(3);
-  const [showPaywall, setShowPaywall] = useState(false);
-  
-  // Lead Info
-  const [leadInfo, setLeadInfo] = useState({
-    name: "",
-    phone: "",
-    email: "",
-    companions: "", // 'solo' or 'group'
-  });
-  
+  const [serverState, setServerState] = useState<ServerState>("ASK_NAME");
+  const [pendingLead, setPendingLead] = useState<{ name?: string; phone?: string }>({});
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [isTyping, setIsTyping] = useState(false);
+  const [freeMessagesLeft, setFreeMessagesLeft] = useState<number | null>(null);
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [validationError, setValidationError] = useState("");
-  
+  const autoSentRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isTyping]);
+  }, [messages, isStreaming]);
 
-  // Handle initialization of chat
   useEffect(() => {
     if (isOpen && messages.length === 0) {
-      setIsTyping(true);
-      setTimeout(() => {
-        setMessages([
-          {
-            id: "init-1",
-            sender: "ai",
-            text: "Hi! I am your Himalayan Trek Planning Expert from Blue Sheep Adventures. Let's design your dream trek. First, what is your name?",
-          },
-        ]);
-        setIsTyping(false);
-      }, 500);
-
-      if (initialDestination) {
-        setLeadInfo((prev) => ({ ...prev, destination: initialDestination }));
-      }
+      setMessages([{ id: "greet", sender: "ai", text: GREETING }]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+
+  // Auto-send the pre-seeded destination message once lead capture completes
+  useEffect(() => {
+    if (serverState === "FREE_CHAT" && initialMessage && !autoSentRef.current && !isStreaming) {
+      autoSentRef.current = true;
+      void sendTurn(initialMessage);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverState]);
 
   if (!isOpen) return null;
 
-  // Inline inputs validation
-  const validateInput = (value: string): boolean => {
-    if (step === "name") {
-      if (value.trim().length < 2) {
-        setValidationError("Please enter a valid name (minimum 2 characters).");
-        return false;
-      }
-    } else if (step === "phone") {
-      const phoneRegex = /^[6-9]\d{9}$/; // 10-digit Indian mobile format
-      if (!phoneRegex.test(value.trim())) {
-        setValidationError("Please enter a valid 10-digit Indian mobile number.");
-        return false;
-      }
-    } else if (step === "email") {
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(value.trim())) {
-        setValidationError("Please enter a valid email address.");
-        return false;
-      }
-    }
+  async function sendTurn(text: string) {
+    const sentFromState = serverState;
+    setMessages((prev) => [...prev, { id: `u-${Date.now()}`, sender: "user", text }]);
+    setIsStreaming(true);
     setValidationError("");
-    return true;
-  };
-
-  const handleSend = async (textToSend?: string) => {
-    const text = (textToSend || inputValue).trim();
-    if (!text) return;
-
-    if (!validateInput(text)) return;
-
-    // Add user message
-    const userMsgId = Date.now().toString();
-    const userMsg: Message = { id: userMsgId, sender: "user", text };
-    setMessages((prev) => [...prev, userMsg]);
-    if (!textToSend) setInputValue("");
-
-    setIsTyping(true);
-
-    if (step === "name") {
-      setLeadInfo((prev) => ({ ...prev, name: text }));
-      setStep("phone");
-      setTimeout(() => {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: (Date.now() + 1).toString(),
-            sender: "ai",
-            text: `Nice to meet you, ${text}! Please share your 10-digit mobile number so we can link your custom itinerary to your account.`,
-          },
-        ]);
-        setIsTyping(false);
-      }, 800);
-    } else if (step === "phone") {
-      setLeadInfo((prev) => ({ ...prev, phone: text }));
-      setStep("email");
-      setTimeout(() => {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: (Date.now() + 1).toString(),
-            sender: "ai",
-            text: "Great! Lastly, what is your email address? We will secure your itinerary drafts and send a downloadable copy there.",
-          },
-        ]);
-        setIsTyping(false);
-      }, 800);
-    } else if (step === "email") {
-      const updatedLeadInfo = { ...leadInfo, email: text };
-      setLeadInfo((prev) => ({ ...prev, email: text }));
-      setStep("chatting");
-
-      // Register the lead in the backend and get session ID
-      try {
-        const res = await fetch("/api/auth/link-lead", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updatedLeadInfo),
-        });
-        const data = await res.json();
-        if (data.sessionId) {
-          setSessionId(data.sessionId);
-        }
-      } catch (err) {
-        console.error("Failed to link lead:", err);
-      }
-
-      // Initial AI greeting for planning
-      setTimeout(() => {
-        const welcomeMessage = initialMessage 
-          ? `Perfect! I've linked your details. Let's talk about: "${initialMessage}"`
-          : "Perfect! Your profile is linked. Tell me: which Himalayan trek or region are you looking to plan? (e.g. Kashmir Great Lakes, Hampta Pass, EBC)";
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: (Date.now() + 1).toString(),
-            sender: "ai",
-            text: welcomeMessage,
-          },
-        ]);
-        setIsTyping(false);
-
-        if (initialMessage) {
-          // Trigger the first planning message automatically if initialized
-          handleChatMessage(initialMessage);
-        }
-      }, 800);
-    } else if (step === "chatting") {
-      handleChatMessage(text);
-    }
-  };
-
-  const handleChatMessage = async (text: string) => {
-    if (freeMessagesLeft <= 0) {
-      setShowPaywall(true);
-      setIsTyping(false);
-      return;
-    }
-
-    const nextFreeMessages = freeMessagesLeft - 1;
-    setFreeMessagesLeft(nextFreeMessages);
-    setIsTyping(true);
-
-    const activeMessages = [...messages];
-    // If we just appended the user message in handleSend, it's already in the state
-    const hasUserMsg = activeMessages.some((m) => m.text === text && m.sender === "user");
-    const chatPayload = hasUserMsg 
-      ? activeMessages 
-      : [...activeMessages, { id: Date.now().toString(), sender: "user" as const, text }];
 
     try {
-      const response = await fetch("/api/chat", {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: chatPayload,
-          leadInfo: { ...leadInfo, sessionId },
-          sessionId,
-          messageCount: 3 - freeMessagesLeft,
-        }),
+        body: JSON.stringify({ message: text, sessionId, pendingLead }),
       });
 
-      if (response.status === 402) {
+      if (res.status === 402) {
+        setServerState("PAYWALLED");
+        setFreeMessagesLeft(0);
         setShowPaywall(true);
-        setIsTyping(false);
         return;
       }
-
-      if (!response.ok) {
-        throw new Error("Chat request failed");
+      if (!res.ok || !res.body) {
+        throw new Error(`chat request failed (${res.status})`);
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No readable stream");
+      const aiMsgId = `a-${Date.now()}`;
+      setMessages((prev) => [...prev, { id: aiMsgId, sender: "ai", text: "" }]);
 
+      const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      const tempId = "assistant-temp-" + Date.now();
-      
-      // Append temporary streaming message
-      setMessages((prev) => [...prev, { id: tempId, sender: "ai", text: "" }]);
-      setIsTyping(false);
+      let currentEvent = "";
 
-      let currentText = "";
-      let parsedItinerary: any = null;
+      const handlePayload = (event: string, payload: any) => {
+        if (event === "meta") {
+          if (payload.state) {
+            setServerState(payload.state);
+            // Record the accepted lead field when the server advances the state
+            if (sentFromState === "ASK_NAME" && payload.state === "ASK_PHONE") {
+              setPendingLead((p) => ({ ...p, name: text }));
+            } else if (sentFromState === "ASK_PHONE" && payload.state === "ASK_EMAIL") {
+              setPendingLead((p) => ({ ...p, phone: text }));
+            }
+          }
+          if (payload.sessionId) setSessionId(payload.sessionId);
+          if (typeof payload.freeMessagesLeft === "number") setFreeMessagesLeft(payload.freeMessagesLeft);
+          if (payload.fieldError) setValidationError(payload.fieldError);
+          if (payload.state === "PAYWALLED") setShowPaywall(true);
+        } else if (event === "itinerary") {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === aiMsgId ? { ...m, itinerary: payload } : m))
+          );
+        } else if (payload.t) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === aiMsgId ? { ...m, text: m.text + payload.t } : m))
+          );
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-        const chunk = decoder.decode(value, { stream: true });
-        buffer += chunk;
-
-        // Process SSE lines
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("data: ")) {
-            const dataContent = trimmed.slice(6);
-            
-            // Check if it's an event itinerary chunk or standard text
-            if (dataContent.startsWith("{") && dataContent.endsWith("}")) {
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() ?? "";
+        for (const block of blocks) {
+          currentEvent = "";
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event: ")) currentEvent = line.slice(7).trim();
+            else if (line.startsWith("data: ")) {
               try {
-                parsedItinerary = JSON.parse(dataContent);
-              } catch (e) {
-                // Not full JSON yet or parsing error, treat as text
-                currentText += dataContent;
+                handlePayload(currentEvent, JSON.parse(line.slice(6)));
+              } catch {
+                /* ignore malformed chunk */
               }
-            } else {
-              currentText += dataContent;
             }
-
-            setMessages((prev) =>
-              prev.map((m) => (m.id === tempId ? { ...m, text: currentText } : m))
-            );
-          } else if (trimmed.startsWith("event: itinerary")) {
-            // The itinerary payload will be delivered on the next data line
-          } else if (trimmed.startsWith("event: limit_reached")) {
-            setShowPaywall(true);
           }
         }
       }
-
-      // If we finished streaming and detected an itinerary in the parsed JSON
-      if (parsedItinerary) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === tempId
-              ? {
-                  ...m,
-                  isItinerary: true,
-                  itineraryData: parsedItinerary,
-                }
-              : m
-          )
-        );
-      }
     } catch (err) {
-      console.error("Error streaming chat:", err);
-      // Fallback assistant response on failure
+      console.error("chat error:", err);
       setMessages((prev) => [
         ...prev,
-        {
-          id: "error-reply-" + Date.now(),
-          sender: "ai",
-          text: "I encountered an issue connecting to the safety server. Please check your internet or retry your request.",
-        },
+        { id: `e-${Date.now()}`, sender: "ai", text: "I hit a connection issue — please try again." },
       ]);
     } finally {
-      setIsTyping(false);
+      setIsStreaming(false);
     }
+  }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = inputValue.trim();
+    if (!text || isStreaming) return;
+    if (serverState === "PAYWALLED" || freeMessagesLeft === 0) {
+      setShowPaywall(true);
+      return;
+    }
+    setInputValue("");
+    void sendTurn(text);
   };
 
+  const placeholder =
+    serverState === "ASK_NAME" ? "Enter your name…"
+    : serverState === "ASK_PHONE" ? "10-digit mobile number, e.g. 9876543210…"
+    : serverState === "ASK_EMAIL" ? "yourname@example.com…"
+    : freeMessagesLeft === 0 ? "Free questions used — upgrade to continue."
+    : "Ask about routes, gear, season, safety…";
+
+  const inputLocked = isStreaming || serverState === "PAYWALLED" || (serverState === "FREE_CHAT" && freeMessagesLeft === 0);
+
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm transition-all duration-300">
-      {/* Background click to close */}
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm">
       <div className="flex-1" onClick={onClose} />
 
-      {/* Main chat panel */}
-      <div className="w-full max-w-xl h-full bg-slate-950 border-l border-white/10 flex flex-col relative shadow-2xl">
+      <div className="w-full max-w-xl h-full bg-ink-950 border-l border-white/10 flex flex-col relative shadow-2xl">
         {/* Header */}
-        <div className="p-4 border-b border-white/10 flex items-center justify-between bg-slate-900/50 backdrop-blur-md">
+        <div className="p-4 border-b border-white/10 flex items-center justify-between bg-ink-900/50 backdrop-blur-md">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-amber-500 to-amber-300 flex items-center justify-center shadow-lg">
-              <Sparkles className="w-5 h-5 text-slate-950" />
+            <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-gold-500 to-gold-300 flex items-center justify-center shadow-lg">
+              <Sparkles className="w-5 h-5 text-ink-950" />
             </div>
             <div>
-              <h4 className="text-white font-serif font-bold text-base flex items-center gap-1.5">
-                BSA AI Coordinator
-                <span className="text-[10px] bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full font-sans font-bold">
-                  Expert
-                </span>
-              </h4>
-              <p className="text-[11px] text-white/50">Himalayan Route & Safety Planner</p>
+              <h4 className="text-white font-serif font-bold text-base">BSA AI Coordinator</h4>
+              <p className="text-[11px] text-white/50">Himalayan route & safety planner</p>
             </div>
           </div>
-          <button 
+          <button
             onClick={onClose}
             className="p-1.5 hover:bg-white/10 rounded-lg text-white/70 hover:text-white transition-colors cursor-pointer"
+            aria-label="Close chat"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Message Meter for Free Trial */}
-        {step === "chatting" && (
-          <div className="bg-gradient-to-r from-amber-500/10 to-sky-500/10 border-b border-white/5 px-4 py-2.5 flex items-center justify-between text-xs text-white/80">
+        {/* Free-message meter */}
+        {serverState === "FREE_CHAT" && freeMessagesLeft !== null && (
+          <div className="bg-gradient-to-r from-gold-500/10 to-sky-500/10 border-b border-white/5 px-4 py-2.5 flex items-center justify-between text-xs text-white/80">
             <span className="flex items-center gap-1.5">
-              <Info className="w-3.5 h-3.5 text-amber-500" />
+              <Info className="w-3.5 h-3.5 text-gold-400" />
               {freeMessagesLeft > 0 ? (
-                <>You have <strong className="text-amber-400">{freeMessagesLeft}</strong> free questions left.</>
+                <>You have <strong className="text-gold-300">{freeMessagesLeft} of 3</strong> free messages left.</>
               ) : (
-                <strong className="text-amber-400">Free chat limit reached.</strong>
+                <strong className="text-gold-300">Free chat limit reached.</strong>
               )}
             </span>
-            <button 
+            <button
               onClick={() => setShowPaywall(true)}
-              className="text-[10px] text-amber-400 uppercase font-bold tracking-wider hover:underline cursor-pointer"
+              className="text-[10px] text-gold-400 uppercase font-bold tracking-wider hover:underline cursor-pointer"
             >
-              Unlock Now
+              Go Premium
             </button>
           </div>
         )}
 
-        {/* Messages list */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-thumb-white/10">
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.map((msg) => (
-            <div 
-              key={msg.id}
-              className={`flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div 
-                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm transition-all duration-300 ${
-                  msg.sender === "user" 
-                    ? "bg-amber-500 text-slate-950 rounded-tr-none font-medium shadow-md shadow-amber-500/10" 
-                    : "bg-slate-900 border border-white/10 text-white rounded-tl-none"
+            <div key={msg.id} className={`flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm ${
+                  msg.sender === "user"
+                    ? "bg-gold-500 text-ink-950 rounded-tr-none font-medium"
+                    : "bg-ink-900 border border-white/10 text-white rounded-tl-none"
                 }`}
               >
-                {msg.text}
-                
-                {msg.isItinerary && msg.itineraryData && (
+                {msg.text || (isStreaming ? "…" : "")}
+                {msg.itinerary && (
                   <div className="mt-3">
-                    <ItineraryCard 
-                      data={msg.itineraryData} 
-                      onUnlock={() => setShowPaywall(true)}
-                    />
+                    <ItineraryCard data={msg.itinerary} onUnlock={() => setShowPaywall(true)} />
                   </div>
                 )}
               </div>
             </div>
           ))}
 
-          {/* Typing Indicator */}
-          {isTyping && (
+          {isStreaming && messages[messages.length - 1]?.sender === "user" && (
             <div className="flex justify-start">
-              <div className="bg-slate-900 border border-white/10 text-white rounded-2xl rounded-tl-none px-4 py-3 flex gap-1 items-center">
-                <span className="w-1.5 h-1.5 bg-white/40 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+              <div className="bg-ink-900 border border-white/10 rounded-2xl rounded-tl-none px-4 py-3 flex gap-1 items-center">
+                <span className="w-1.5 h-1.5 bg-white/40 rounded-full animate-bounce" />
                 <span className="w-1.5 h-1.5 bg-white/40 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
                 <span className="w-1.5 h-1.5 bg-white/40 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
               </div>
             </div>
           )}
-          
+
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input panel */}
-        <div className="p-4 border-t border-white/10 bg-slate-900/30">
+        {/* Input */}
+        <div className="p-4 border-t border-white/10 bg-ink-900/30">
           {validationError && (
-            <div className="text-[11px] text-rose-400 font-semibold mb-2 bg-rose-500/5 border border-rose-500/10 rounded-lg py-1 px-2">
+            <div className="text-[11px] text-rose-400 font-semibold mb-2 bg-rose-500/5 border border-rose-500/10 rounded-lg py-1.5 px-2.5">
               ⚠️ {validationError}
             </div>
           )}
-          
-          <form 
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSend();
-            }}
-            className="flex gap-2"
-          >
-            <input 
-              type={step === "email" ? "email" : step === "phone" ? "tel" : "text"}
+
+          <form onSubmit={handleSubmit} className="flex gap-2">
+            <input
+              type={serverState === "ASK_EMAIL" ? "email" : serverState === "ASK_PHONE" ? "tel" : "text"}
               value={inputValue}
               onChange={(e) => {
                 setInputValue(e.target.value);
                 if (validationError) setValidationError("");
               }}
-              placeholder={
-                step === "name" 
-                  ? "Enter your name..." 
-                  : step === "phone" 
-                  ? "e.g. 9876543210 (10-digit mobile)..." 
-                  : step === "email" 
-                  ? "e.g. yourname@example.com..." 
-                  : freeMessagesLeft <= 0 
-                  ? "Free questions ended. Unlock premium." 
-                  : "Ask about the route, gears, safety..."
-              }
-              disabled={step === "chatting" && freeMessagesLeft <= 0}
-              className="flex-1 bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-white/40 focus:outline-none focus:border-amber-500 transition-colors"
+              placeholder={placeholder}
+              disabled={inputLocked && !isStreaming}
+              className="flex-1 bg-ink-950 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-white/40 focus:outline-none focus:border-gold-500 transition-colors"
             />
-            <button 
+            <button
               type="submit"
-              disabled={!inputValue.trim() || (step === "chatting" && freeMessagesLeft <= 0)}
-              className="bg-amber-500 hover:bg-amber-400 disabled:bg-white/10 disabled:text-white/30 text-slate-950 p-3 rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer shrink-0"
+              disabled={!inputValue.trim() || inputLocked}
+              className="bg-gold-500 hover:bg-gold-400 disabled:bg-white/10 disabled:text-white/30 text-ink-950 p-3 rounded-xl transition-all flex items-center justify-center cursor-pointer shrink-0"
+              aria-label="Send message"
             >
               <Send className="w-4 h-4" />
             </button>
           </form>
-          
+
           <div className="mt-3 flex items-center justify-between text-[10px] text-white/40">
             <span className="flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" /> WFR Safety Verified Data
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" /> Grounded on verified route data
             </span>
             <span>Blue Sheep Adventures</span>
           </div>
         </div>
 
-        {/* Paywall Overlay/Modal */}
-        <PaywallModal 
-          isOpen={showPaywall} 
-          onClose={() => setShowPaywall(false)} 
-        />
+        <PaywallModal isOpen={showPaywall} onClose={() => setShowPaywall(false)} />
       </div>
     </div>
   );

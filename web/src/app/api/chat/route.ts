@@ -1,270 +1,415 @@
+// The core chat route (CLAUDE.md §6.2, §7.1–7.3).
+//
+// Server-authoritative state machine:
+//   ASK_NAME → ASK_PHONE → ASK_EMAIL → (lead banked, session created) → FREE_CHAT(3) → PAYWALLED
+//
+// Protocol: POST { message, sessionId?, pendingLead?: { name?, phone? } }
+//   - Lead-capture turns carry no sessionId; the server validates each field
+//     and the lead is inserted (deduped by phone) only at the email step.
+//   - Free-chat turns carry sessionId; metering is summed across all the
+//     lead's sessions, so new sessions/incognito with the same phone share the meter.
+//   - Over limit → HTTP 402 + paywall payload (client opens the paywall modal).
+//
+// Response: SSE stream, every data payload is JSON:
+//   event: meta       → { state, sessionId?, freeMessagesLeft?, fieldError? }
+//   (default)         → { t: "text chunk" }
+//   event: itinerary  → { id, content, providerTeaser }
+//   event: done       → {}
+
 import { NextRequest, NextResponse } from "next/server";
-import { createServerClient } from "@/lib/supabase";
+import { store } from "@/lib/store";
 import { ai, CHAT_MODEL, EMBEDDING_MODEL, ITINERARY_FALLBACK_MODEL, SYSTEM_PROMPT } from "@/lib/ai";
+import { treks } from "@/lib/treks";
+import { REGIONS } from "@/lib/himalaya-config";
 
 export const dynamic = "force-dynamic";
 
+const FREE_LIMIT = 3;
+const PHONE_RE = /^[6-9]\d{9}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// ── Per-IP rate limit (in-memory token bucket, §7.2) ─────────────────────
+const ipHits = new Map<string, { count: number; resetAt: number }>();
+function rateLimited(ip: string): boolean {
+  const now = Date.now();
+  const slot = ipHits.get(ip);
+  if (!slot || now > slot.resetAt) {
+    ipHits.set(ip, { count: 1, resetAt: now + 60_000 });
+    return false;
+  }
+  slot.count += 1;
+  return slot.count > 30;
+}
+
+// ── Itinerary content schema (guided_json) — NO provider/phone fields ────
+const ITINERARY_SCHEMA = {
+  type: "object",
+  properties: {
+    trek: { type: "string" },
+    region: { type: "string", enum: ["kashmir", "himachal", "uttarakhand", "nepal"] },
+    title: { type: "string" },
+    durationDays: { type: "integer" },
+    maxAltitude: { type: "integer" },
+    difficulty: { type: "string", enum: ["Easy", "Moderate", "Hard", "Very Hard"] },
+    days: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          n: { type: "integer" },
+          title: { type: "string" },
+          km: { type: "number" },
+          altFrom: { type: "integer" },
+          altTo: { type: "integer" },
+          hours: { type: "number" },
+          difficulty: { type: "string" },
+          meals: { type: "string" },
+          tips: { type: "string" },
+        },
+        required: ["n", "title", "km", "altFrom", "altTo", "hours", "difficulty", "meals", "tips"],
+      },
+    },
+  },
+  required: ["trek", "region", "title", "durationDays", "maxAltitude", "difficulty", "days"],
+} as const;
+
+// ── SSE helpers ───────────────────────────────────────────────────────────
+const enc = new TextEncoder();
+function sse(controller: ReadableStreamDefaultController, payload: unknown, event?: string) {
+  const head = event ? `event: ${event}\n` : "";
+  controller.enqueue(enc.encode(`${head}data: ${JSON.stringify(payload)}\n\n`));
+}
+
+function sseResponse(body: ReadableStream) {
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+/** Stream a fixed string as a few chunks (scripted lead-capture replies). */
+function streamScripted(controller: ReadableStreamDefaultController, text: string) {
+  for (const piece of text.match(/.{1,48}(\s|$)/g) ?? [text]) {
+    sse(controller, { t: piece });
+  }
+}
+
+// ── Mock helpers (run the full flow before a real NVIDIA key exists) ─────
+function findTrekInText(text: string) {
+  const lower = text.toLowerCase();
+  return treks.find(
+    (t) =>
+      lower.includes(t.name.toLowerCase().replace(" trek", "")) ||
+      lower.includes(t.slug.replace(/-/g, " "))
+  );
+}
+
+function mockItinerary(conversation: string) {
+  const trek = findTrekInText(conversation) ?? treks.find((t) => t.slug === "hampta-pass")!;
+  const days = Array.from({ length: trek.duration }, (_, i) => {
+    const n = i + 1;
+    const frac = trek.duration === 1 ? 1 : i / (trek.duration - 1);
+    const alt = Math.round(2000 + (trek.maxAltitude - 2000) * Math.min(1, frac * 1.4));
+    return {
+      n,
+      title:
+        n === 1 ? `Arrival & trailhead briefing` :
+        n === trek.duration ? `Descent & drive back` :
+        trek.highlights[(n - 2) % trek.highlights.length].slice(0, 60),
+      km: n === 1 || n === trek.duration ? 4 : 9 + (n % 3) * 2,
+      altFrom: Math.max(1800, alt - 500),
+      altTo: alt,
+      hours: n === 1 ? 2 : 5 + (n % 3),
+      difficulty: trek.difficulty,
+      meals: "Breakfast · Packed lunch · Dinner",
+      tips: "Hydrate well and watch for AMS symptoms above 3,000m.",
+    };
+  });
+  return {
+    trek: trek.name,
+    region: trek.region,
+    title: `${trek.name} — ${trek.duration}-Day DIY Itinerary`,
+    durationDays: trek.duration,
+    maxAltitude: trek.maxAltitude,
+    difficulty: trek.difficulty,
+    days,
+  };
+}
+
+const MOCK_REPLIES = [
+  (msg: string) => {
+    const trek = findTrekInText(msg);
+    return trek
+      ? `${trek.name} is a great choice — ${trek.shortDesc} It runs ${trek.duration} days, topping out at ${trek.maxAltitude.toLocaleString()}m (${trek.difficulty}). Best season: ${trek.bestSeason}. Are you trekking solo or with a group, and roughly when do you want to go?`
+      : `Happy to help you plan! Phase 1 covers Himachal, Uttarakhand, Kashmir and Nepal. Which trek or region is calling you — for example Kashmir Great Lakes, Hampta Pass, Kedarkantha, or Everest Base Camp?`;
+  },
+  () =>
+    `Noted. Two quick things that shape the plan: how many trekking days can you spare in total (including travel), and have you been above 3,500m before? That decides the acclimatisation profile I build in.`,
+  () =>
+    `Perfect — I have everything I need. Building your day-by-day itinerary now, grounded on our verified route data…`,
+];
+
+// ── The route ─────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+  if (rateLimited(ip)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
+  let body: { message?: string; sessionId?: string; pendingLead?: { name?: string; phone?: string } };
   try {
-    const { messages, sessionId, messageCount } = await req.json();
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
 
-    if (!sessionId) {
-      return NextResponse.json({ error: "Session ID is required" }, { status: 400 });
-    }
+  const message = (body.message ?? "").trim();
+  if (!message) {
+    return NextResponse.json({ error: "message is required" }, { status: 400 });
+  }
+  const db = store();
 
-    const supabase = createServerClient();
+  // ════ LEAD-CAPTURE TURNS (no session yet) ════════════════════════════
+  if (!body.sessionId) {
+    const pending = body.pendingLead ?? {};
 
-    // 1. Fetch chat session to check metering
-    const { data: session, error: sessionError } = await supabase
-      .from("chat_sessions")
-      .select("lead_id, free_messages_used")
-      .eq("id", sessionId)
-      .single();
-
-    if (sessionError || !session) {
-      return NextResponse.json({ error: "Chat session not found" }, { status: 400 });
-    }
-
-    // 2. Fetch lead to see if they are premium (subscription)
-    const { data: lead, error: leadError } = await supabase
-      .from("leads")
-      .select("user_id")
-      .eq("id", session.lead_id)
-      .single();
-
-    let isPremium = false;
-    if (lead && lead.user_id) {
-      const { data: subscription } = await supabase
-        .from("subscriptions")
-        .select("ai_unlimited, expires_at")
-        .eq("user_id", lead.user_id)
-        .single();
-
-      if (subscription) {
-        const isExpired = subscription.expires_at 
-          ? new Date(subscription.expires_at).getTime() < Date.now()
-          : true;
-        if (subscription.ai_unlimited && !isExpired) {
-          isPremium = true;
-        }
-      }
-    }
-
-    // Check free message limit (cap at 3 messages)
-    const currentUsed = session.free_messages_used || 0;
-    if (!isPremium && currentUsed >= 3) {
-      return new Response(
-        `event: limit_reached\ndata: {"error":"Free message limit reached"}\n\n`,
-        {
-          status: 402,
-          headers: {
-            "Content-Type": "text/event-stream; charset=utf-8",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
+    // ASK_NAME — message is the name
+    if (!pending.name) {
+      const ok = message.length >= 2 && message.length <= 80;
+      return sseResponse(
+        new ReadableStream({
+          start(c) {
+            sse(c, { state: ok ? "ASK_PHONE" : "ASK_NAME", fieldError: ok ? null : "Please enter a valid name (minimum 2 characters)." }, "meta");
+            streamScripted(
+              c,
+              ok
+                ? `Nice to meet you, ${message}! Please share your 10-digit mobile number — your itinerary gets linked to it.`
+                : `That doesn't look like a name — could you tell me your name again?`
+            );
+            sse(c, {}, "done");
+            c.close();
           },
-        }
+        })
       );
     }
 
-    // 3. Increment message usage counter if user is not premium
-    if (!isPremium) {
-      const { error: updateError } = await supabase
-        .from("chat_sessions")
-        .update({ free_messages_used: currentUsed + 1 })
-        .eq("id", sessionId);
-
-      if (updateError) {
-        console.error("Failed to increment free message counter:", updateError);
-      }
+    // ASK_PHONE — message is the phone
+    if (!pending.phone) {
+      const ok = PHONE_RE.test(message);
+      return sseResponse(
+        new ReadableStream({
+          start(c) {
+            sse(c, { state: ok ? "ASK_EMAIL" : "ASK_PHONE", fieldError: ok ? null : "Please enter a valid 10-digit Indian mobile number." }, "meta");
+            streamScripted(
+              c,
+              ok
+                ? `Great! Last one — what's your email address? Your itinerary drafts and the PDF copy go there.`
+                : `Hmm, that number doesn't look right. A 10-digit Indian mobile number, please (e.g. 9876543210).`
+            );
+            sse(c, {}, "done");
+            c.close();
+          },
+        })
+      );
     }
 
-    // 4. Retrieve context using RAG
-    const aiClient = ai();
-    let ragContext = "";
+    // ASK_EMAIL — message is the email → bank the lead, create session
+    if (!EMAIL_RE.test(message)) {
+      return sseResponse(
+        new ReadableStream({
+          start(c) {
+            sse(c, { state: "ASK_EMAIL", fieldError: "Please enter a valid email address." }, "meta");
+            streamScripted(c, `That email doesn't look valid — mind checking it once more?`);
+            sse(c, {}, "done");
+            c.close();
+          },
+        })
+      );
+    }
 
-    if (aiClient) {
+    // Server-side re-validation of the full pending lead before insert
+    if (!PHONE_RE.test(pending.phone) || pending.name.length < 2) {
+      return NextResponse.json({ error: "Invalid lead fields" }, { status: 400 });
+    }
+
+    const lead = await db.upsertLeadByPhone({ name: pending.name, phone: pending.phone, email: message });
+    const session = await db.createSession(lead.id);
+    const used = await db.countedMessagesForLead(lead.id);
+    const left = Math.max(0, FREE_LIMIT - used);
+
+    return sseResponse(
+      new ReadableStream({
+        start(c) {
+          sse(c, { state: left > 0 ? "FREE_CHAT" : "PAYWALLED", sessionId: session.id, freeMessagesLeft: left }, "meta");
+          streamScripted(
+            c,
+            left > 0
+              ? `You're all set, ${pending.name}! Tell me: which Himalayan trek or region do you want to plan? (e.g. Kashmir Great Lakes, Hampta Pass, Kedarkantha, EBC)`
+              : `Welcome back, ${pending.name}! You've already used your free itinerary chat. Upgrade to Premium (₹1,499) for unlimited planning, itinerary editing and 5 guide unlocks.`
+          );
+          sse(c, {}, "done");
+          c.close();
+        },
+      })
+    );
+  }
+
+  // ════ FREE_CHAT TURNS (session exists) ═══════════════════════════════
+  const session = await db.getSession(body.sessionId);
+  if (!session) {
+    return NextResponse.json({ error: "Chat session not found" }, { status: 400 });
+  }
+
+  const isPremium = await db.isPremiumLead(session.lead_id);
+  const usedBefore = await db.countedMessagesForLead(session.lead_id);
+
+  if (!isPremium && usedBefore >= FREE_LIMIT) {
+    return NextResponse.json(
+      {
+        paywall: true,
+        message: "Free message limit reached.",
+        premium: { price: 1499, perks: ["Unlimited AI chat", "Itinerary editing & regeneration", "5 guide unlocks"] },
+        singleUnlock: { price: 499, perks: ["One verified provider contact"] },
+      },
+      { status: 402 }
+    );
+  }
+
+  if (!isPremium) await db.incrementMeter(session.id);
+  await db.saveMessage(session.id, "user", message, !isPremium);
+
+  const usedNow = isPremium ? usedBefore : usedBefore + 1;
+  const left = Math.max(0, FREE_LIMIT - usedNow);
+  const isItineraryTurn = !isPremium && usedNow === FREE_LIMIT;
+
+  const history = await db.getSessionMessages(session.id);
+  const client = ai();
+
+  // RAG: embed the question, retrieve grounding chunks (no-ops without Supabase/key)
+  let ragContext = "";
+  if (client) {
+    try {
+      const embed = await client.embeddings.create({
+        model: EMBEDDING_MODEL,
+        input: message,
+        encoding_format: "float",
+        // @ts-expect-error NVIDIA extension
+        extra_body: { input_type: "query" },
+      });
+      const chunks = await db.matchChunks(embed.data[0].embedding as number[]);
+      ragContext = chunks.join("\n\n");
+    } catch (e) {
+      console.error("[chat] RAG retrieval failed:", e);
+    }
+  }
+
+  const systemPrompt = `${SYSTEM_PROMPT}
+
+GROUNDING CONTEXT (TRUTH LAYER — route facts may ONLY come from here):
+${ragContext || "No verified route records were retrieved for this query. If the user asks for route specifics we don't have, say we don't cover that trek yet and offer the nearest covered destinations."}`;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      sse(controller, { state: "FREE_CHAT", sessionId: session.id, freeMessagesLeft: left }, "meta");
+      let assistantText = "";
+
       try {
-        const lastUserMessage = messages[messages.length - 1]?.text || "";
-        if (lastUserMessage) {
-          // Generate embedding for query
-          const embedRes = await aiClient.embeddings.create({
-            model: EMBEDDING_MODEL,
-            input: lastUserMessage,
-            encoding_format: "float",
-            extra_body: { input_type: "query" },
-          } as any);
+        if (client) {
+          // `extra_body` is an NVIDIA NIM extension the SDK types don't know
+          const completion = (await client.chat.completions.create({
+            model: CHAT_MODEL,
+            messages: [
+              { role: "system", content: systemPrompt },
+              ...history.map((m) => ({ role: m.role, content: m.content })),
+            ],
+            temperature: 1.0,
+            top_p: 0.95,
+            stream: true,
+            extra_body: { chat_template_kwargs: { enable_thinking: false } },
+          } as any)) as unknown as AsyncIterable<{ choices: { delta?: { content?: string } }[] }>;
+          for await (const chunk of completion) {
+            const t = chunk.choices[0]?.delta?.content ?? "";
+            if (t) {
+              assistantText += t;
+              sse(controller, { t });
+            }
+          }
+        } else {
+          // Mock mode: deterministic, grounded on lib/treks data
+          const reply = MOCK_REPLIES[Math.min(usedNow - 1, MOCK_REPLIES.length - 1)](message);
+          assistantText = reply;
+          for (const piece of reply.match(/.{1,42}(\s|$)/g) ?? [reply]) {
+            sse(controller, { t: piece });
+            await new Promise((r) => setTimeout(r, 35));
+          }
+        }
 
-          const queryEmbedding = embedRes.data[0].embedding;
+        await db.saveMessage(session.id, "assistant", assistantText, false);
 
-          // Call RPC for vector comparison
-          const { data: chunks, error: rpcError } = await supabase.rpc("match_chunks", {
-            query_embedding: queryEmbedding,
-            match_threshold: 0.3,
-            match_count: 4,
+        // ── First-itinerary emission on the 3rd counted message ──────────
+        if (isItineraryTurn) {
+          let content: ReturnType<typeof mockItinerary> | null = null;
+          const conversation = [...history, { role: "assistant", content: assistantText }]
+            .map((m) => `${m.role}: ${m.content}`)
+            .join("\n");
+
+          if (client) {
+            try {
+              const completion = (await client.chat.completions.create({
+                model: ITINERARY_FALLBACK_MODEL,
+                messages: [
+                  { role: "system", content: "You generate structured trek itinerary JSON. Route facts come ONLY from the provided context; if context is missing, produce a conservative plan and keep altitude gains gradual." },
+                  { role: "user", content: `Context:\n${ragContext || "(none)"}\n\nConversation:\n${conversation}\n\nGenerate the itinerary JSON.` },
+                ],
+                temperature: 1.0,
+                top_p: 0.95,
+                extra_body: { nvext: { guided_json: ITINERARY_SCHEMA } },
+              } as any)) as { choices: { message?: { content?: string } }[] };
+              content = JSON.parse(completion.choices[0]?.message?.content ?? "null");
+            } catch (e) {
+              console.error("[chat] guided_json itinerary failed, using mock:", e);
+            }
+          }
+          if (!content) content = mockItinerary(conversation);
+
+          const itineraryId = await db.saveItinerary({
+            source: "ai_generated",
+            trek: content.trek,
+            region: content.region,
+            content,
+            lead_id: session.lead_id,
           });
 
-          if (!rpcError && chunks && chunks.length > 0) {
-            ragContext = chunks.map((c: any) => c.chunk_text).join("\n\n");
-          }
+          // Provider teaser: counts only — numbers never leave the server (§5)
+          const regionCfg = REGIONS.find((r) => r.id === content.region);
+          const dbCount = await db.verifiedProviderCount(content.region);
+          sse(
+            controller,
+            {
+              id: itineraryId,
+              content,
+              providerTeaser: {
+                guides: dbCount || regionCfg?.guideCount || 0,
+                region: regionCfg?.name ?? content.region,
+              },
+            },
+            "itinerary"
+          );
         }
-      } catch (ragErr) {
-        console.error("RAG search failed, falling back to basic prompting:", ragErr);
+
+        sse(controller, { freeMessagesLeft: left }, "done");
+      } catch (err) {
+        console.error("[chat] stream error:", err);
+        sse(controller, { t: "I hit a connection issue — please try that again." });
+        sse(controller, {}, "done");
+      } finally {
+        controller.close();
       }
-    }
+    },
+  });
 
-    // Construct grounded system prompt
-    const finalSystemPrompt = `${SYSTEM_PROMPT}
-    
-GROUNDING CONTEXT (TRUTH LAYER — ONLY USE INFORMATION BELOW TO ANSWER DETAILS):
-${ragContext || "No verified trail or guide records were found for this query in the database. Politely indicate we don't cover this location yet if they ask for details."}`;
-
-    // 5. Streaming chat completion via NVIDIA NIM
-    const encoder = new TextEncoder();
-    
-    const customStream = new ReadableStream({
-      async start(controller) {
-        try {
-          if (aiClient) {
-            const responseStream = (await aiClient.chat.completions.create({
-              model: CHAT_MODEL,
-              messages: [
-                { role: "system", content: finalSystemPrompt },
-                ...messages.map((m: any) => ({
-                  role: m.sender === "user" ? "user" : "assistant",
-                  content: m.text,
-                })),
-              ],
-              temperature: 1.0,
-              top_p: 0.95,
-              stream: true,
-              extra_body: { chat_template_kwargs: { enable_thinking: false } }
-            } as any)) as any;
-
-            let streamedAnswer = "";
-
-            for await (const chunk of responseStream) {
-              const text = chunk.choices[0]?.delta?.content || "";
-              if (text) {
-                streamedAnswer += text;
-                controller.enqueue(encoder.encode(`data: ${text}\n`));
-              }
-            }
-
-            // 6. Generate Itinerary on the 3rd turn (currentUsed === 2)
-            if (!isPremium && currentUsed === 2) {
-              try {
-                // Prompt template for Llama guided_json call
-                const itinerarySchema = {
-                  type: "object",
-                  properties: {
-                    title: { type: "string" },
-                    duration: { type: "string" },
-                    maxAltitude: { type: "string" },
-                    difficulty: { type: "string" },
-                    companions: { type: "string" },
-                    days: {
-                      type: "array",
-                      items: {
-                        type: "object",
-                        properties: {
-                          day: { type: "integer" },
-                          title: { type: "string" },
-                          details: { type: "string" }
-                        },
-                        required: ["day", "title", "details"]
-                      }
-                    },
-                    guide: {
-                      type: "object",
-                      properties: {
-                        name: { type: "string" },
-                        rating: { type: "string" },
-                        trips: { type: "string" },
-                        phone: { type: "string" }
-                      },
-                      required: ["name", "rating", "trips", "phone"]
-                    }
-                  },
-                  required: ["title", "duration", "maxAltitude", "difficulty", "companions", "days", "guide"]
-                };
-
-                const itineraryPrompt = `You are a structured itinerary generator. Review the following conversation and context, then generate a day-by-day itinerary JSON object matching the schema.
-                
-Conversation:
-${messages.map((m: any) => `${m.sender}: ${m.text}`).join("\n")}
-
-Context:
-${ragContext}`;
-
-                const jsonCompletion = await aiClient.chat.completions.create({
-                  model: ITINERARY_FALLBACK_MODEL,
-                  messages: [
-                    { role: "system", content: "You output valid structured JSON itineraries only." },
-                    { role: "user", content: itineraryPrompt }
-                  ],
-                  extra_body: {
-                    nvext: {
-                      guided_json: JSON.stringify(itinerarySchema)
-                    }
-                  }
-                } as any);
-
-                const itineraryJsonText = jsonCompletion.choices[0]?.message?.content || "";
-                if (itineraryJsonText) {
-                  const itineraryObj = JSON.parse(itineraryJsonText);
-                  
-                  // Save itinerary to database
-                  const { error: insertError } = await supabase
-                    .from("itineraries")
-                    .insert({
-                      source: "ai_generated",
-                      trek: itineraryObj.title,
-                      content: itineraryObj,
-                      lead_id: session.lead_id,
-                    });
-
-                  if (insertError) {
-                    console.error("Failed to save generated itinerary:", insertError);
-                  }
-
-                  // Stream itinerary payload
-                  controller.enqueue(encoder.encode(`event: itinerary\n`));
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(itineraryObj)}\n\n`));
-                }
-              } catch (itineraryErr) {
-                console.error("Itinerary generation failed:", itineraryErr);
-              }
-            }
-
-          } else {
-            // Mock streaming if no apiClient
-            const mockText = `This is a simulated expert response since the NVIDIA API key is not configured.
-            For your Himalayan route, make sure to drink at least 4-5 liters of water daily, monitor your altitude gain, and ensure you climb with a verified local guide who understands Wilderness First Responder guidelines.`;
-            
-            const words = mockText.split(" ");
-            for (const word of words) {
-              controller.enqueue(encoder.encode(`data: ${word} \n`));
-              await new Promise((resolve) => setTimeout(resolve, 60));
-            }
-          }
-          
-          controller.close();
-        } catch (err) {
-          controller.error(err);
-        }
-      },
-    });
-
-    return new Response(customStream, {
-      headers: {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-      },
-    });
-
-  } catch (err: any) {
-    console.error("General API error:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
-  }
+  return sseResponse(stream);
 }

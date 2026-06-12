@@ -7,9 +7,10 @@ import OpenAI from "openai";
 
 const getNvidiaClient = (): OpenAI | null => {
   const apiKey = process.env.NVIDIA_API_KEY;
-  if (!apiKey) {
+  // Real keys look like "nvapi-" + ~64 chars; reject empty AND placeholder values
+  if (!apiKey || apiKey.length < 40 || apiKey.toLowerCase().includes("your")) {
     console.warn(
-      "NVIDIA_API_KEY not set — AI features will use mock responses."
+      "NVIDIA_API_KEY not set (or placeholder) — AI features will use mock responses."
     );
     return null;
   }
