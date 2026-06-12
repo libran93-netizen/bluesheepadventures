@@ -17,6 +17,9 @@ const getNvidiaClient = (): OpenAI | null => {
   return new OpenAI({
     baseURL: "https://integrate.api.nvidia.com/v1",
     apiKey,
+    // Constrained itinerary generation on the 120B model runs ~40-60s
+    timeout: 180_000,
+    maxRetries: 2,
   });
 };
 
@@ -30,10 +33,12 @@ export function ai(): OpenAI | null {
 }
 
 // ─── Model Constants ────────────────────────────────────────────────────
-export const CHAT_MODEL = "nvidia/nemotron-3-super";
+// Exact catalog ID verified against /v1/models on Jun 12, 2026
+export const CHAT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 export const EMBEDDING_MODEL = "nvidia/nv-embedqa-e5-v5";
-// Fallback if Nemotron doesn't support guided_json for itinerary emission
-export const ITINERARY_FALLBACK_MODEL = "meta/llama-3.3-70b-instruct";
+// Smoke test (Jun 12, 2026): Nemotron honours nvext.guided_json with
+// enable_thinking=false — itinerary emission uses CHAT_MODEL, no fallback needed.
+export const ITINERARY_MODEL = CHAT_MODEL;
 
 // ─── Default Chat Config ────────────────────────────────────────────────
 export const CHAT_CONFIG = {

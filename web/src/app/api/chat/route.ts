@@ -18,7 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { store } from "@/lib/store";
-import { ai, CHAT_MODEL, EMBEDDING_MODEL, ITINERARY_FALLBACK_MODEL, SYSTEM_PROMPT } from "@/lib/ai";
+import { ai, CHAT_MODEL, EMBEDDING_MODEL, ITINERARY_MODEL, SYSTEM_PROMPT } from "@/lib/ai";
 import { treks } from "@/lib/treks";
 import { REGIONS } from "@/lib/himalaya-config";
 
@@ -41,7 +41,7 @@ function rateLimited(ip: string): boolean {
   return slot.count > 30;
 }
 
-// ── Itinerary content schema (guided_json) — NO provider/phone fields ────
+// ── Itinerary content schema (structured output) — NO provider/phone fields ──
 const ITINERARY_SCHEMA = {
   type: "object",
   properties: {
@@ -67,10 +67,12 @@ const ITINERARY_SCHEMA = {
           tips: { type: "string" },
         },
         required: ["n", "title", "km", "altFrom", "altTo", "hours", "difficulty", "meals", "tips"],
+        additionalProperties: false,
       },
     },
   },
   required: ["trek", "region", "title", "durationDays", "maxAltitude", "difficulty", "days"],
+  additionalProperties: false,
 } as const;
 
 // ── SSE helpers ───────────────────────────────────────────────────────────
@@ -357,16 +359,27 @@ ${ragContext || "No verified route records were retrieved for this query. If the
             .join("\n");
 
           if (client) {
+            // Generation takes ~40-60s — tell the user before going quiet
+            sse(controller, { t: "\n\nBuilding your day-by-day itinerary now — this takes up to a minute…" });
             try {
               const completion = (await client.chat.completions.create({
-                model: ITINERARY_FALLBACK_MODEL,
+                model: ITINERARY_MODEL,
                 messages: [
                   { role: "system", content: "You generate structured trek itinerary JSON. Route facts come ONLY from the provided context; if context is missing, produce a conservative plan and keep altitude gains gradual." },
                   { role: "user", content: `Context:\n${ragContext || "(none)"}\n\nConversation:\n${conversation}\n\nGenerate the itinerary JSON.` },
                 ],
                 temperature: 1.0,
                 top_p: 0.95,
-                extra_body: { nvext: { guided_json: ITINERARY_SCHEMA } },
+                max_tokens: 4096,
+                // Verified Jun 12, 2026: Nemotron honours OpenAI-style
+                // response_format json_schema; nvext.guided_json is ignored.
+                response_format: {
+                  type: "json_schema",
+                  json_schema: { name: "itinerary", schema: ITINERARY_SCHEMA },
+                },
+                extra_body: {
+                  chat_template_kwargs: { enable_thinking: false },
+                },
               } as any)) as { choices: { message?: { content?: string } }[] };
               content = JSON.parse(completion.choices[0]?.message?.content ?? "null");
             } catch (e) {

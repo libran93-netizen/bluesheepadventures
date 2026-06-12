@@ -2,9 +2,9 @@
 // Run after putting a real key in web/.env.local:  node scripts/nvidia-smoke.mjs
 //
 // Verifies:
-//   1. Chat: nvidia/nemotron-3-super streams with enable_thinking=false
+//   1. Chat: Nemotron 3 Super streams with enable_thinking=false
 //   2. Latency benchmark: thinking off vs low_effort=True (pick for chat turns)
-//   3. guided_json on Nemotron — if rejected, confirm meta/llama-3.3-70b-instruct
+//   3. Structured output (response_format json_schema) on Nemotron + Llama
 //   4. Embeddings: nvidia/nv-embedqa-e5-v5 query/passage modes, 1024 dims
 
 import { readFileSync, existsSync } from "node:fs";
@@ -26,7 +26,7 @@ if (!KEY || KEY.length < 40 || KEY.toLowerCase().includes("your")) {
 }
 
 const BASE = "https://integrate.api.nvidia.com/v1";
-const CHAT_MODEL = "nvidia/nemotron-3-super";
+const CHAT_MODEL = "nvidia/nemotron-3-super-120b-a12b"; // exact catalog ID (verified Jun 12, 2026)
 const FALLBACK_MODEL = "meta/llama-3.3-70b-instruct";
 const EMBED_MODEL = "nvidia/nv-embedqa-e5-v5";
 
@@ -70,19 +70,23 @@ const schema = {
   type: "object",
   properties: { trek: { type: "string" }, days: { type: "integer" } },
   required: ["trek", "days"],
+  additionalProperties: false, // without this the grammar permits rambling extra keys
 };
+// Finding (Jun 12, 2026): nvext.guided_json is IGNORED by both models on
+// integrate.api.nvidia.com — OpenAI-style response_format json_schema works.
 for (const model of [CHAT_MODEL, FALLBACK_MODEL]) {
   try {
     const out = await post("/chat/completions", {
       model,
       messages: [{ role: "user", content: "Emit JSON for a 6-day Hampta Pass trek." }],
-      max_tokens: 100,
-      nvext: { guided_json: schema },
+      max_tokens: 1024,
+      chat_template_kwargs: { enable_thinking: false },
+      response_format: { type: "json_schema", json_schema: { name: "itinerary", schema } },
     });
     const parsed = JSON.parse(out.choices?.[0]?.message?.content ?? "");
-    results.push(`✓ guided_json [${model}] → ${JSON.stringify(parsed)}`);
+    results.push(`✓ structured output [${model}] → ${JSON.stringify(parsed)}`);
   } catch (e) {
-    results.push(`✗ guided_json [${model}] FAILED: ${e.message.slice(0, 200)}`);
+    results.push(`✗ structured output [${model}] FAILED: ${e.message.slice(0, 200)}`);
   }
 }
 
