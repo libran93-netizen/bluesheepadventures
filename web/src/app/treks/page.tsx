@@ -4,118 +4,105 @@ import Nav from "@/components/Nav";
 import Footer from "@/components/Footer";
 import TrekCard from "@/components/TrekCard";
 import { treks } from "@/lib/treks";
+import { Sparkles } from "lucide-react";
 
 export const metadata: Metadata = {
-  title: "All Treks & Expeditions",
+  title: "All Himalayan Treks",
   description:
-    "Browse all Himalayan treks and high-altitude expeditions offered by Blue Sheep Adventures — from moderate passes to 6,000m summits in Himachal Pradesh, Ladakh and Nepal.",
+    "Browse every trek on Blue Sheep Adventures — Kashmir, Himachal Pradesh, Uttarakhand and Nepal. Free AI itineraries and verified local guide contacts for each route.",
 };
 
-export default function TreksPage() {
-  const moderate = treks.filter((t) => t.difficulty === "Moderate" || t.difficulty === "Easy");
-  const hard = treks.filter((t) => t.difficulty === "Hard" || t.difficulty === "Very Hard");
+const SECTIONS = [
+  {
+    id: "kashmir",
+    title: "Kashmir",
+    blurb: "Alpine lakes and meadowed valleys — the gentlest beauty in the high Himalaya.",
+  },
+  {
+    id: "himachal",
+    title: "Himachal Pradesh",
+    blurb: "Deodar forests, high passes, and the stark trans-Himalayan desert of Lahaul & Spiti.",
+  },
+  {
+    id: "uttarakhand",
+    title: "Uttarakhand",
+    blurb: "Sacred Garhwal — vast bugyals, frozen lakes, and classic winter summits.",
+  },
+  {
+    id: "nepal",
+    title: "Nepal",
+    blurb: "The giants. Everest, Annapurna and Langtang — the ultimate high-altitude tests.",
+  },
+] as const;
 
+export default function TreksPage() {
   return (
-    <>
+    <div className="min-h-screen bg-ink-950 text-white">
       <Nav />
 
-      {/* Page Hero */}
-      <section
-        style={{
-          background: "linear-gradient(160deg, var(--navy) 0%, var(--navy-mid) 100%)",
-          padding: "10rem 2rem 5rem",
-          textAlign: "center",
-        }}
-      >
-        <div style={{ maxWidth: 640, margin: "0 auto" }}>
-          <span className="eyebrow">Himachal · Ladakh · Nepal</span>
-          <h1
-            style={{
-              fontFamily: "var(--ff-display)",
-              fontSize: "clamp(2.5rem, 6vw, 4rem)",
-              fontWeight: 700,
-              color: "var(--white)",
-              lineHeight: 1.1,
-              marginBottom: "1.2rem",
-            }}
-          >
-            Treks &amp; Expeditions
+      {/* Page hero */}
+      <section className="pt-32 md:pt-40 pb-14 md:pb-20 border-b border-white/[0.06] bg-gradient-to-b from-ink-900/80 to-ink-950">
+        <div className="container text-center max-w-2xl mx-auto">
+          <p className="text-[11px] font-bold tracking-[0.3em] uppercase text-gold-500 mb-3">
+            Himachal · Uttarakhand · Kashmir · Nepal
+          </p>
+          <h1 className="font-serif text-4xl md:text-5xl font-bold leading-tight">
+            Every route, verified.
           </h1>
-          <p style={{ color: "rgba(255,255,255,0.6)", fontSize: "1rem", lineHeight: 1.75 }}>
-            Every route led by certified, experienced leaders who know these mountains personally.
-            Choose your level — we'll get you there safely.
+          <p className="mt-4 text-sm md:text-base text-white/55 leading-relaxed">
+            Thirteen Himalayan treks across four regions. Plan any of them free with the AI,
+            download your itinerary, and unlock the local guides who run the route.
           </p>
         </div>
       </section>
 
-      <main style={{ background: "var(--cream)", padding: "5rem 0 7rem" }}>
-        <div className="container">
+      <main className="py-16 md:py-24 space-y-20 md:space-y-28">
+        {SECTIONS.map((section) => {
+          const regionTreks = treks.filter((t) => t.region === section.id);
+          if (regionTreks.length === 0) return null;
+          return (
+            <section key={section.id} id={section.id} className="container">
+              <div className="mb-8 md:mb-10">
+                <h2 className="font-serif text-2xl md:text-3xl font-bold text-white">
+                  {section.title}
+                  <span className="ml-3 text-sm font-sans font-bold text-white/30 align-middle">
+                    {regionTreks.length} {regionTreks.length === 1 ? "route" : "routes"}
+                  </span>
+                </h2>
+                <p className="mt-2 text-sm text-white/50 max-w-xl">{section.blurb}</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 md:gap-6">
+                {regionTreks.map((trek) => (
+                  <TrekCard key={trek.slug} trek={trek} />
+                ))}
+              </div>
+            </section>
+          );
+        })}
 
-          {/* Moderate Treks */}
-          <div style={{ marginBottom: "5rem" }}>
-            <div className="section-head" style={{ textAlign: "left", marginBottom: "2rem" }}>
-              <span className="eyebrow">For Trekkers</span>
-              <h2>Moderate Routes</h2>
-              <p style={{ textAlign: "left" }}>
-                Challenging without technical climbing — ideal for fit, motivated trekkers
-                looking for their first serious Himalayan experience.
-              </p>
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1.5rem" }}>
-              {moderate.map((trek) => (
-                <TrekCard key={trek.slug} trek={trek} />
-              ))}
-            </div>
-          </div>
-
-          {/* Hard / Expeditions */}
-          <div>
-            <div className="section-head" style={{ textAlign: "left", marginBottom: "2rem" }}>
-              <span className="eyebrow">For Climbers</span>
-              <h2>High-Altitude Expeditions</h2>
-              <p style={{ textAlign: "left" }}>
-                Technical terrain, glacier travel, and summits above 5,000m.
-                Requires prior altitude experience and serious preparation.
-              </p>
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1.5rem" }}>
-              {hard.map((trek) => (
-                <TrekCard key={trek.slug} trek={trek} />
-              ))}
-            </div>
-          </div>
-
-          {/* Enquiry CTA */}
-          <div
-            style={{
-              background: "var(--navy)",
-              borderRadius: "var(--radius)",
-              padding: "3rem",
-              marginTop: "5rem",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: "2rem",
-              flexWrap: "wrap",
-            }}
-          >
+        {/* CTA */}
+        <section className="container">
+          <div className="rounded-3xl bg-gradient-to-r from-ink-800 to-ink-900 border border-white/[0.08] px-8 py-10 md:px-14 md:py-14 flex flex-col md:flex-row items-center justify-between gap-6 text-center md:text-left">
             <div>
-              <h3 style={{ fontFamily: "var(--ff-display)", fontSize: "1.6rem", fontWeight: 700, color: "var(--white)", marginBottom: "0.5rem" }}>
-                Not sure which trek is right for you?
+              <h3 className="font-serif text-2xl md:text-3xl font-bold text-white">
+                Not sure which trek fits you?
               </h3>
-              <p style={{ color: "rgba(255,255,255,0.6)", fontSize: "0.95rem" }}>
-                Tell us your experience level and goals — we'll match you to the right route.
+              <p className="mt-2 text-sm text-white/55 max-w-lg">
+                Tell the AI your fitness, dates and dream views — it'll match you to the
+                right route and build your first itinerary free.
               </p>
             </div>
-            <Link href="/contact" className="btn btn-primary" style={{ flexShrink: 0 }}>
-              Get a Recommendation →
+            <Link
+              href="/#plan"
+              className="shrink-0 inline-flex items-center gap-2 bg-gold-500 hover:bg-gold-400 text-ink-950 font-bold text-sm rounded-full px-7 py-3.5 transition-colors"
+            >
+              <Sparkles className="w-4 h-4" /> Plan with AI
             </Link>
           </div>
-
-        </div>
+        </section>
       </main>
 
       <Footer />
-    </>
+    </div>
   );
 }

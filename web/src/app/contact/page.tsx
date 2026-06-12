@@ -1,136 +1,113 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import Nav from "@/components/Nav";
 import Footer from "@/components/Footer";
+import { Mail, Instagram, MapPin, Sparkles } from "lucide-react";
 
 export const metadata: Metadata = {
-  title: "Book a Trek",
+  title: "Contact",
   description:
-    "Get in touch with Blue Sheep Adventures to book a Himalayan trek or expedition, or to ask any questions before you commit.",
+    "Get in touch with Blue Sheep Adventures — questions about DIY trek planning, guide listings, or partnerships.",
 };
+
+const CHANNELS = [
+  {
+    icon: Mail,
+    label: "Email",
+    value: "info@bluesheepadventures.com",
+    href: "mailto:info@bluesheepadventures.com",
+  },
+  {
+    icon: Instagram,
+    label: "Instagram",
+    value: "@bluesheepadventures",
+    href: "https://instagram.com/bluesheepadventures",
+  },
+  {
+    icon: MapPin,
+    label: "Base",
+    value: "Himachal Pradesh, India",
+    href: null,
+  },
+];
 
 export default function ContactPage() {
   return (
-    <>
+    <div className="min-h-screen bg-ink-950 text-white">
       <Nav />
 
-      <section
-        style={{
-          background: "linear-gradient(160deg, var(--navy) 0%, var(--navy-mid) 100%)",
-          padding: "10rem 2rem 5rem",
-          textAlign: "center",
-        }}
-      >
-        <div style={{ maxWidth: 560, margin: "0 auto" }}>
-          <span className="eyebrow">Let&apos;s Go</span>
-          <h1 style={{ fontFamily: "var(--ff-display)", fontSize: "clamp(2.5rem, 5vw, 3.5rem)", fontWeight: 700, color: "var(--white)", lineHeight: 1.1, marginBottom: "1rem" }}>
-            Plan Your Trek
-          </h1>
-          <p style={{ color: "rgba(255,255,255,0.6)", lineHeight: 1.75 }}>
-            Tell us what you&apos;re looking for — we&apos;ll respond within 24 hours
-            with availability, recommendations, and next steps.
+      <section className="pt-32 md:pt-40 pb-14 md:pb-20 border-b border-white/[0.06] bg-gradient-to-b from-ink-900/80 to-ink-950">
+        <div className="container text-center max-w-xl mx-auto">
+          <p className="text-[11px] font-bold tracking-[0.3em] uppercase text-gold-500 mb-3">
+            Say hello
+          </p>
+          <h1 className="font-serif text-4xl md:text-5xl font-bold leading-tight">Contact us</h1>
+          <p className="mt-4 text-sm md:text-base text-white/55 leading-relaxed">
+            Planning questions go to the AI — it's faster and knows the routes. For
+            everything else (guide listings, partnerships, press), reach us directly.
           </p>
         </div>
       </section>
 
-      <main style={{ background: "var(--cream)", padding: "5rem 0 7rem" }}>
-        <div className="container">
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5rem", maxWidth: 1000, margin: "0 auto" }}>
-
-            {/* Contact info */}
-            <div>
-              <h2 style={{ fontFamily: "var(--ff-display)", fontSize: "1.8rem", fontWeight: 700, color: "var(--ink)", marginBottom: "1.5rem" }}>
-                Get in Touch
-              </h2>
-              <p style={{ color: "var(--ink-mid)", lineHeight: 1.8, marginBottom: "2rem" }}>
-                Whether you have a specific trek in mind or just want to understand your options,
-                we&apos;re happy to help. Most enquiries get a detailed response within one business day.
-              </p>
-              <div style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
-                {[
-                  { icon: "✉", label: "Email", value: "info@bluesheepadventures.com", href: "mailto:info@bluesheepadventures.com" },
-                  { icon: "📸", label: "Instagram", value: "@bluesheepadventures", href: "https://instagram.com/bluesheepadventures" },
-                  { icon: "📍", label: "Base", value: "Himachal Pradesh, India", href: null },
-                ].map((c) => (
-                  <div key={c.label} style={{ display: "flex", gap: "1rem", alignItems: "flex-start" }}>
-                    <div style={{ width: 40, height: 40, background: "var(--navy)", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1rem", flexShrink: 0 }}>
-                      {c.icon}
-                    </div>
-                    <div>
-                      <div style={{ fontSize: "0.72rem", fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase", color: "var(--ink-light)", marginBottom: "0.2rem" }}>{c.label}</div>
-                      {c.href ? (
-                        <a href={c.href} style={{ fontSize: "0.95rem", color: "var(--sky)", fontWeight: 500 }}>{c.value}</a>
-                      ) : (
-                        <span style={{ fontSize: "0.95rem", color: "var(--ink-mid)" }}>{c.value}</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
+      <main className="py-16 md:py-24">
+        <div className="container max-w-3xl">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 md:gap-5">
+            {CHANNELS.map((c) => (
+              <div
+                key={c.label}
+                className="rounded-2xl bg-ink-900/70 border border-white/[0.07] p-6 text-center"
+              >
+                <c.icon className="w-6 h-6 text-gold-400 mx-auto mb-3.5" strokeWidth={1.7} />
+                <div className="text-[10px] font-bold tracking-[0.2em] uppercase text-white/40 mb-1">
+                  {c.label}
+                </div>
+                {c.href ? (
+                  <a
+                    href={c.href}
+                    target={c.href.startsWith("http") ? "_blank" : undefined}
+                    rel="noopener noreferrer"
+                    className="text-sm font-medium text-white hover:text-gold-300 transition-colors break-all"
+                  >
+                    {c.value}
+                  </a>
+                ) : (
+                  <span className="text-sm font-medium text-white/80">{c.value}</span>
+                )}
               </div>
-            </div>
+            ))}
+          </div>
 
-            {/* Enquiry form */}
-            <div
-              style={{
-                background: "var(--white)",
-                borderRadius: "var(--radius)",
-                padding: "2.5rem",
-                boxShadow: "0 4px 30px rgba(0,0,0,0.08)",
-              }}
+          {/* Are you a guide? */}
+          <div className="mt-10 rounded-3xl bg-gradient-to-r from-ink-800 to-ink-900 border border-white/[0.08] px-8 py-10 md:px-12 text-center">
+            <h2 className="font-serif text-2xl md:text-3xl font-bold text-white">
+              Are you a local guide?
+            </h2>
+            <p className="mt-3 text-sm text-white/55 max-w-md mx-auto leading-relaxed">
+              Get listed free, receive direct leads from trekkers, and keep 100% of what
+              you earn. Email us your name, region and the treks you run.
+            </p>
+            <a
+              href="mailto:info@bluesheepadventures.com?subject=Guide%20listing"
+              className="mt-6 inline-flex items-center gap-2 bg-white hover:bg-white/90 text-ink-950 font-bold text-sm rounded-full px-7 py-3.5 transition-colors"
             >
-              <h3 style={{ fontFamily: "var(--ff-display)", fontSize: "1.4rem", fontWeight: 700, color: "var(--ink)", marginBottom: "1.5rem" }}>
-                Trek Enquiry
-              </h3>
-              <form style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
-                  <div>
-                    <label style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--ink-mid)", display: "block", marginBottom: "0.4rem" }}>Name</label>
-                    <input type="text" name="name" placeholder="Your name" required style={{ width: "100%", padding: "0.75rem 1rem", border: "1px solid var(--cream-dark)", borderRadius: "var(--radius-sm)", fontSize: "0.9rem", outline: "none" }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--ink-mid)", display: "block", marginBottom: "0.4rem" }}>Email</label>
-                    <input type="email" name="email" placeholder="your@email.com" required style={{ width: "100%", padding: "0.75rem 1rem", border: "1px solid var(--cream-dark)", borderRadius: "var(--radius-sm)", fontSize: "0.9rem", outline: "none" }} />
-                  </div>
-                </div>
-                <div>
-                  <label style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--ink-mid)", display: "block", marginBottom: "0.4rem" }}>Trek / Expedition Interested In</label>
-                  <select name="trek" style={{ width: "100%", padding: "0.75rem 1rem", border: "1px solid var(--cream-dark)", borderRadius: "var(--radius-sm)", fontSize: "0.9rem", background: "white", outline: "none" }}>
-                    <option value="">Select a trek</option>
-                    <option>Kang Yatse 2 Expedition</option>
-                    <option>Yunam Peak</option>
-                    <option>Friendship Peak</option>
-                    <option>Rupin Pass Trek</option>
-                    <option>Hampta Pass Trek</option>
-                    <option>Pin Parvati Pass</option>
-                    <option>Not sure — need a recommendation</option>
-                  </select>
-                </div>
-                <div>
-                  <label style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--ink-mid)", display: "block", marginBottom: "0.4rem" }}>Group Size</label>
-                  <select name="group_size" style={{ width: "100%", padding: "0.75rem 1rem", border: "1px solid var(--cream-dark)", borderRadius: "var(--radius-sm)", fontSize: "0.9rem", background: "white", outline: "none" }}>
-                    <option>Solo</option>
-                    <option>2 people</option>
-                    <option>3-4 people</option>
-                    <option>5-8 people</option>
-                    <option>Larger group</option>
-                  </select>
-                </div>
-                <div>
-                  <label style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--ink-mid)", display: "block", marginBottom: "0.4rem" }}>Tell us about your experience &amp; dates</label>
-                  <textarea name="message" rows={4} placeholder="Previous trekking experience, preferred dates, any questions..." style={{ width: "100%", padding: "0.75rem 1rem", border: "1px solid var(--cream-dark)", borderRadius: "var(--radius-sm)", fontSize: "0.9rem", resize: "vertical", outline: "none" }} />
-                </div>
-                <button type="submit" className="btn btn-primary" style={{ width: "100%", justifyContent: "center" }}>
-                  Send Enquiry →
-                </button>
-                <p style={{ fontSize: "0.75rem", color: "var(--ink-light)", textAlign: "center" }}>
-                  We respond within 24 hours. No spam, ever.
-                </p>
-              </form>
-            </div>
+              Apply to be listed
+            </a>
+          </div>
+
+          {/* Plan CTA */}
+          <div className="mt-10 text-center">
+            <p className="text-sm text-white/45">Want to plan a trek instead?</p>
+            <Link
+              href="/#plan"
+              className="mt-3 inline-flex items-center gap-2 text-gold-400 hover:text-gold-300 font-bold text-sm uppercase tracking-wider transition-colors"
+            >
+              <Sparkles className="w-4 h-4" /> Talk to the AI planner
+            </Link>
           </div>
         </div>
       </main>
 
       <Footer />
-    </>
+    </div>
   );
 }
