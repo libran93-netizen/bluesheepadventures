@@ -125,7 +125,7 @@ ${ragContext || "No verified trail or guide records were found for this query in
       async start(controller) {
         try {
           if (aiClient) {
-            const responseStream = await aiClient.chat.completions.create({
+            const responseStream = (await aiClient.chat.completions.create({
               model: CHAT_MODEL,
               messages: [
                 { role: "system", content: finalSystemPrompt },
@@ -138,7 +138,7 @@ ${ragContext || "No verified trail or guide records were found for this query in
               top_p: 0.95,
               stream: true,
               extra_body: { chat_template_kwargs: { enable_thinking: false } }
-            } as any);
+            } as any)) as any;
 
             let streamedAnswer = "";
 

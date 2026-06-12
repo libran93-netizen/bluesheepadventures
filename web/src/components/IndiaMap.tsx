@@ -51,7 +51,7 @@ export default function IndiaMap({ onSelectRegion, onSelectTrek, selectedRegion 
           />
 
           {/* Region Paths */}
-          {REGIONS.map((region) => {
+          {REGIONS.map((region: any) => {
             const isHovered = hoveredRegion === region.id;
             const isSelected = selectedRegion === region.id;
             
@@ -71,7 +71,7 @@ export default function IndiaMap({ onSelectRegion, onSelectTrek, selectedRegion 
           })}
 
           {/* Region Name Texts */}
-          {REGIONS.map((region) => {
+          {REGIONS.map((region: any) => {
             // Find centroid coordinate from path to place region name nicely
             let tx = 0, ty = 0;
             if (region.id === "kashmir") { tx = 180; ty = 165; }
@@ -97,7 +97,7 @@ export default function IndiaMap({ onSelectRegion, onSelectTrek, selectedRegion 
           })}
 
           {/* Trek Pins */}
-          {TREK_PINS.map((pin) => {
+          {TREK_PINS.map((pin: any) => {
             const isHighAltitude = pin.maxAltitude > 4000;
             const isHovered = hoveredTrek === pin.slug;
             const region = REGIONS.find((r) => r.id === pin.regionId);
@@ -160,7 +160,7 @@ export default function IndiaMap({ onSelectRegion, onSelectTrek, selectedRegion 
 
         {/* Trek Hover Tooltip (HTML overlay) */}
         {hoveredTrek && (() => {
-          const pin = TREK_PINS.find((p) => p.slug === hoveredTrek)!;
+          const pin = TREK_PINS.find((p) => p.slug === hoveredTrek)! as any;
           const isHighAltitude = pin.maxAltitude > 4000;
           return (
             <div className="absolute z-30 bg-slate-950/95 border border-white/10 rounded-xl p-3 shadow-xl max-w-[200px] pointer-events-none transition-all duration-200 text-left"

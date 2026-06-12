@@ -12,6 +12,7 @@ export interface RegionConfig {
   description: string;
   trekCount: number;
   guideCount: number;
+  path?: string; // Optional path for 2D map component
 }
 
 export interface TrekPinConfig {
@@ -22,6 +23,8 @@ export interface TrekPinConfig {
   difficulty: "Easy" | "Moderate" | "Hard" | "Very Hard";
   duration: number; // days
   maxAltitude: number; // metres
+  x?: number; // Optional 2D coordinate x
+  y?: number; // Optional 2D coordinate y
 }
 
 // Default camera: wide view of the whole Himalayan arc, pitched so the range reads as mountains
