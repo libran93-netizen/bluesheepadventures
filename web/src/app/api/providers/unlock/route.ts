@@ -1,178 +1,99 @@
+// Unlock flow (CLAUDE.md §7.4) — server-side, atomic, idempotent.
+//
+//   POST { providerId, sessionId }
+//     → resolve user from session (shadow user created at payment)
+//     → existing unlock?            return phone (no charge)
+//     → spend_unlock_credit() RPC?  unlock(source=premium_credit) → phone
+//     → unconsumed PAID ₹499 order? unlock(source=single) → phone
+//     → else 402 (client opens checkout, then retries after verify)
+//
+// The phone number leaves the server ONLY through this response.
+
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import crypto from "crypto";
+import { userIdForSession } from "@/lib/account";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
-    const supabase = createServerClient();
-
-    // 1. Get authenticated user from Supabase session
-    // Since service-role client is used, we must retrieve the user using the auth token in headers.
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      return NextResponse.json({ error: "Missing authentication token" }, { status: 401 });
+    const { providerId, sessionId } = await req.json();
+    if (!providerId || !sessionId) {
+      return NextResponse.json({ error: "providerId and sessionId required" }, { status: 400 });
     }
 
-    const token = authHeader.replace("Bearer ", "");
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    const db = createServerClient();
+    const { userId } = await userIdForSession(sessionId);
 
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const { data: provider } = await db
+      .from("providers")
+      .select("id,name,phone,status")
+      .eq("id", providerId)
+      .maybeSingle();
+    if (!provider || provider.status !== "verified") {
+      return NextResponse.json({ error: "Provider not found" }, { status: 404 });
     }
 
-    const { providerId, useCredit, razorpayOrderId, razorpayPaymentId, razorpaySignature } = await req.json();
+    const reveal = (source: string) =>
+      NextResponse.json({
+        success: true,
+        source,
+        provider: { id: provider.id, name: provider.name, phone: provider.phone },
+      });
 
-    if (!providerId) {
-      return NextResponse.json({ error: "Provider ID is required" }, { status: 400 });
-    }
-
-    // 2. Check if already unlocked (Idempotent check)
-    const { data: existingUnlock } = await supabase
+    // 1. Idempotent: already unlocked → return phone, never charge twice
+    const { data: existing } = await db
       .from("unlocks")
-      .select("id")
-      .eq("user_id", user.id)
+      .select("id,source")
+      .eq("user_id", userId)
       .eq("provider_id", providerId)
       .maybeSingle();
+    if (existing) return reveal(existing.source);
 
-    if (existingUnlock) {
-      // Get the provider's phone number
-      const { data: provider } = await supabase
-        .from("providers")
-        .select("phone")
-        .eq("id", providerId)
-        .single();
-
-      return NextResponse.json({
-        success: true,
-        phone: provider?.phone,
-        message: "Already unlocked previously",
-      });
+    // 2. Premium credit — atomic decrement-with-check in Postgres
+    const { data: creditTaken } = await db.rpc("spend_unlock_credit", { p_user_id: userId });
+    if (creditTaken === true) {
+      const { error } = await db
+        .from("unlocks")
+        .insert({ user_id: userId, provider_id: providerId, source: "premium_credit" });
+      if (error) throw error;
+      return reveal("premium_credit");
     }
 
-    // 3. Option A: Unlock using Premium Credit
-    if (useCredit) {
-      // Fetch subscription credits
-      const { data: sub, error: subError } = await supabase
-        .from("subscriptions")
-        .select("unlock_credits")
-        .eq("user_id", user.id)
-        .single();
-
-      if (subError || !sub || sub.unlock_credits <= 0) {
-        return NextResponse.json({ error: "Insufficient unlock credits" }, { status: 400 });
-      }
-
-      // Decrement credits atomatically
-      const { error: decrementError } = await supabase
-        .from("subscriptions")
-        .update({ unlock_credits: sub.unlock_credits - 1 })
-        .eq("user_id", user.id);
-
-      if (decrementError) {
-        throw decrementError;
-      }
-
-      // Insert unlock
-      const { error: unlockInsertError } = await supabase
+    // 3. Unconsumed paid ₹499 order
+    const { data: paidOrders } = await db
+      .from("payments")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("type", "single_unlock")
+      .eq("status", "paid");
+    if (paidOrders && paidOrders.length > 0) {
+      const { data: consumed } = await db
         .from("unlocks")
-        .insert({
-          user_id: user.id,
+        .select("payment_id")
+        .eq("user_id", userId)
+        .not("payment_id", "is", null);
+      const used = new Set((consumed ?? []).map((u) => u.payment_id));
+      const fresh = paidOrders.find((p) => !used.has(p.id));
+      if (fresh) {
+        const { error } = await db.from("unlocks").insert({
+          user_id: userId,
           provider_id: providerId,
-          source: "premium_credit",
-        });
-
-      if (unlockInsertError) {
-        throw unlockInsertError;
-      }
-
-      // Retrieve provider number
-      const { data: provider } = await supabase
-        .from("providers")
-        .select("phone")
-        .eq("id", providerId)
-        .single();
-
-      return NextResponse.json({
-        success: true,
-        phone: provider?.phone,
-        message: "Unlock successful using premium credit",
-      });
-    }
-
-    // 4. Option B: Unlock using one-time ₹499 Razorpay Payment
-    if (razorpayOrderId && razorpayPaymentId && razorpaySignature) {
-      // Verify signature
-      const secret = process.env.RAZORPAY_KEY_SECRET;
-      if (!secret) {
-        return NextResponse.json({ error: "Razorpay credentials not configured on server" }, { status: 500 });
-      }
-
-      const body = razorpayOrderId + "|" + razorpayPaymentId;
-      const expectedSignature = crypto
-        .createHmac("sha256", secret)
-        .update(body)
-        .digest("hex");
-
-      if (expectedSignature !== razorpaySignature) {
-        return NextResponse.json({ error: "Invalid payment signature verification failed" }, { status: 400 });
-      }
-
-      // Save/update payment record
-      const { error: paymentError } = await supabase
-        .from("payments")
-        .upsert({
-          user_id: user.id,
-          razorpay_order_id: razorpayOrderId,
-          razorpay_payment_id: razorpayPaymentId,
-          amount: 49900, // ₹499 in paise
-          type: "single_unlock",
-          status: "paid",
-        });
-
-      if (paymentError) {
-        console.error("Failed to store payment details:", paymentError);
-      }
-
-      // Fetch payment row id
-      const { data: payment } = await supabase
-        .from("payments")
-        .select("id")
-        .eq("razorpay_order_id", razorpayOrderId)
-        .single();
-
-      // Insert unlock record
-      const { error: unlockInsertError } = await supabase
-        .from("unlocks")
-        .insert({
-          user_id: user.id,
-          provider_id: providerId,
-          payment_id: payment?.id,
+          payment_id: fresh.id,
           source: "single",
         });
-
-      if (unlockInsertError) {
-        throw unlockInsertError;
+        if (error) throw error;
+        return reveal("single");
       }
-
-      // Retrieve phone number
-      const { data: provider } = await supabase
-        .from("providers")
-        .select("phone")
-        .eq("id", providerId)
-        .single();
-
-      return NextResponse.json({
-        success: true,
-        phone: provider?.phone,
-        message: "Unlock successful via verification",
-      });
     }
 
-    return NextResponse.json({ error: "Unlock credentials or credits required" }, { status: 402 });
-  } catch (err: any) {
-    console.error("Unlock error:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    // 4. Nothing to spend → paywall
+    return NextResponse.json(
+      { paywall: true, error: "No credits or paid order — purchase required" },
+      { status: 402 }
+    );
+  } catch (err) {
+    console.error("[unlock]", err);
+    return NextResponse.json({ error: "Unlock failed" }, { status: 500 });
   }
 }

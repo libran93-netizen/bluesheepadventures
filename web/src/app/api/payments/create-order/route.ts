@@ -1,88 +1,68 @@
+// Creates a Razorpay order for ₹499 (single_unlock) or ₹1,499 (premium).
+// Identity comes from the chat session (shadow auth user created at first
+// payment — see lib/account.ts). Returns checkout params for Razorpay JS.
+
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { userIdForSession } from "@/lib/account";
 import Razorpay from "razorpay";
 
 export const dynamic = "force-dynamic";
 
+const PRICES = { single_unlock: 49900, premium: 149900 } as const; // paise
+
 export async function POST(req: NextRequest) {
   try {
-    const supabase = createServerClient();
+    const body = (await req.json()) as { type?: string; sessionId?: string };
+    const { sessionId } = body;
+    const type = body.type as keyof typeof PRICES;
 
-    // 1. Authenticate user
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      return NextResponse.json({ error: "Missing authentication token" }, { status: 401 });
-    }
-
-    const token = authHeader.replace("Bearer ", "");
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { type } = await req.json();
-
-    if (!type || (type !== "single_unlock" && type !== "premium")) {
+    if (type !== "single_unlock" && type !== "premium") {
       return NextResponse.json({ error: "Invalid payment type" }, { status: 400 });
     }
-
-    const amount = type === "premium" ? 149900 : 49900; // In paise (₹1,499 or ₹499)
+    if (!sessionId) {
+      return NextResponse.json(
+        { error: "sessionId required — start a chat so we can attach your purchase" },
+        { status: 400 }
+      );
+    }
 
     const keyId = process.env.RAZORPAY_KEY_ID;
     const keySecret = process.env.RAZORPAY_KEY_SECRET;
-
-    let orderId = "";
-    let mockPayment = false;
-
-    if (keyId && keySecret) {
-      try {
-        const razorpay = new Razorpay({
-          key_id: keyId,
-          key_secret: keySecret,
-        });
-
-        const order = await razorpay.orders.create({
-          amount,
-          currency: "INR",
-          receipt: `rcpt_${Date.now()}`,
-        });
-
-        orderId = order.id;
-      } catch (rzpErr: any) {
-        console.error("Razorpay order creation failed:", rzpErr);
-        return NextResponse.json({ error: "Payment gateway integration failed" }, { status: 500 });
-      }
-    } else {
-      console.warn("Razorpay API keys not defined. Generating mock order ID.");
-      orderId = `order_mock_${Math.random().toString(36).substring(7)}`;
-      mockPayment = true;
+    if (!keyId || !keySecret || keyId.includes("your")) {
+      return NextResponse.json({ error: "Payment gateway not configured" }, { status: 503 });
     }
 
-    // 2. Log payment attempt in database
-    const { error: insertError } = await supabase
-      .from("payments")
-      .insert({
-        user_id: user.id,
-        razorpay_order_id: orderId,
-        amount,
-        type,
-        status: "created",
-      });
+    const { userId, email, name } = await userIdForSession(sessionId);
+    const amount = PRICES[type];
 
-    if (insertError) {
-      throw insertError;
-    }
-
-    return NextResponse.json({
-      success: true,
-      orderId,
+    const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
+    const order = await razorpay.orders.create({
       amount,
       currency: "INR",
-      mock: mockPayment,
+      receipt: `bsa_${Date.now()}`,
+      notes: { type, sessionId },
     });
-  } catch (err: any) {
-    console.error("Create order error:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+
+    const db = createServerClient();
+    const { error } = await db.from("payments").insert({
+      user_id: userId,
+      razorpay_order_id: order.id,
+      amount,
+      type,
+      status: "created",
+    });
+    if (error) throw error;
+
+    return NextResponse.json({
+      orderId: order.id,
+      amount,
+      currency: "INR",
+      keyId,
+      prefill: { email, name },
+    });
+  } catch (err) {
+    console.error("[create-order]", err);
+    return NextResponse.json({ error: "Could not create order" }, { status: 500 });
   }
 }

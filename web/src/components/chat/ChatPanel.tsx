@@ -289,7 +289,7 @@ export default function ChatPanel({ isOpen, onClose, initialMessage }: ChatPanel
           </div>
         </div>
 
-        <PaywallModal isOpen={showPaywall} onClose={() => setShowPaywall(false)} />
+        <PaywallModal isOpen={showPaywall} onClose={() => setShowPaywall(false)} sessionId={sessionId} />
       </div>
     </div>
   );

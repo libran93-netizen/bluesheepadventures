@@ -1,238 +1,324 @@
 "use client";
 
-import React, { useState } from "react";
-import { X, Check, CreditCard, Sparkles, Map, PhoneCall, ShieldAlert, Award } from "lucide-react";
+// Real Razorpay checkout (test/live by key). Flow:
+//   create-order → Razorpay JS checkout → /api/payments/verify (signature)
+//   → premium: subscription + 5 credits | single: paid order banked
+//   → optional providerId: immediately consume credit/order via unlock → phone
+// Identity = chat session (sessionId). No session → ask user to chat first.
+
+import React, { useEffect, useState } from "react";
+import { X, Check, CreditCard, Sparkles, Map, PhoneCall, ShieldAlert, Award, MessageSquareText } from "lucide-react";
+
+declare global {
+  interface Window {
+    Razorpay?: any;
+  }
+}
+
+interface UnlockedProvider {
+  id: string;
+  name: string;
+  phone: string;
+}
 
 interface PaywallModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Chat session that owns the purchase (required to pay) */
+  sessionId?: string | null;
+  /** If set, the purchase immediately unlocks this provider */
+  providerId?: string;
 }
 
-export default function PaywallModal({ isOpen, onClose }: PaywallModalProps) {
+const PLANS = {
+  single: {
+    type: "single_unlock" as const,
+    label: "₹499",
+    perks: [
+      { icon: PhoneCall, text: "1 verified guide phone + WhatsApp contact" },
+      { icon: Map, text: "Itinerary PDF download" },
+      { icon: Award, text: "Local permit contact & instructions" },
+      { icon: ShieldAlert, text: "48h response guarantee: no response = credit back", highlight: true },
+    ],
+  },
+  premium: {
+    type: "premium" as const,
+    label: "₹1,499",
+    perks: [
+      { icon: PhoneCall, text: "5 local guide contacts unlocked" },
+      { icon: Sparkles, text: "Unlimited AI planning chat" },
+      { icon: Map, text: "Itinerary editing, regeneration, PDF & GPX" },
+      { icon: ShieldAlert, text: "48h response guarantee: no response = credit back", highlight: true },
+    ],
+  },
+};
+
+export default function PaywallModal({ isOpen, onClose, sessionId, providerId }: PaywallModalProps) {
   const [selectedPlan, setSelectedPlan] = useState<"single" | "premium">("premium");
-  const [paymentStep, setPaymentStep] = useState<"plans" | "processing" | "success">("plans");
+  const [step, setStep] = useState<"plans" | "processing" | "success">("plans");
+  const [error, setError] = useState("");
+  const [unlocked, setUnlocked] = useState<UnlockedProvider | null>(null);
+  const [paidType, setPaidType] = useState<"single_unlock" | "premium" | null>(null);
+
+  // Load the Razorpay checkout script once
+  useEffect(() => {
+    if (!isOpen || window.Razorpay) return;
+    const s = document.createElement("script");
+    s.src = "https://checkout.razorpay.com/v1/checkout.js";
+    s.async = true;
+    document.body.appendChild(s);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const handlePayment = () => {
-    setPaymentStep("processing");
-    // Simulate Razorpay gateway checkout
-    setTimeout(() => {
-      setPaymentStep("success");
-    }, 2500);
+  const reset = () => {
+    setStep("plans");
+    setError("");
+    setUnlocked(null);
+    setPaidType(null);
+    onClose();
   };
 
-  const handleReset = () => {
-    setPaymentStep("plans");
-    onClose();
+  const handlePayment = async () => {
+    setError("");
+    if (!sessionId) {
+      setError("Start a chat first (name → phone → email) so we can attach your purchase to your account.");
+      return;
+    }
+    if (!window.Razorpay) {
+      setError("Payment gateway is still loading — try again in a second.");
+      return;
+    }
+    setStep("processing");
+
+    try {
+      const plan = PLANS[selectedPlan];
+      const orderRes = await fetch("/api/payments/create-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: plan.type, sessionId }),
+      });
+      if (!orderRes.ok) throw new Error((await orderRes.json()).error ?? "Order creation failed");
+      const order = await orderRes.json();
+
+      const rzp = new window.Razorpay({
+        key: order.keyId,
+        amount: order.amount,
+        currency: order.currency,
+        name: "Blue Sheep Adventures",
+        description: selectedPlan === "premium" ? "Premium DIY access" : "Single guide unlock",
+        order_id: order.orderId,
+        prefill: order.prefill,
+        theme: { color: "#c8923a" },
+        modal: { ondismiss: () => setStep("plans") },
+        handler: async (resp: any) => {
+          try {
+            const verifyRes = await fetch("/api/payments/verify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                sessionId,
+                razorpayOrderId: resp.razorpay_order_id,
+                razorpayPaymentId: resp.razorpay_payment_id,
+                razorpaySignature: resp.razorpay_signature,
+              }),
+            });
+            if (!verifyRes.ok) throw new Error("Payment verification failed");
+            const verified = await verifyRes.json();
+            setPaidType(verified.type);
+
+            if (providerId) {
+              const unlockRes = await fetch("/api/providers/unlock", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ providerId, sessionId }),
+              });
+              if (unlockRes.ok) {
+                const data = await unlockRes.json();
+                setUnlocked(data.provider);
+              }
+            }
+            setStep("success");
+          } catch (e) {
+            console.error(e);
+            setError("Payment captured but verification failed — contact support, your money is safe.");
+            setStep("plans");
+          }
+        },
+      });
+      rzp.open();
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message ?? "Could not start checkout");
+      setStep("plans");
+    }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
-      {/* Outer Card */}
-      <div className="w-full max-w-2xl bg-slate-950 border border-white/10 rounded-2xl overflow-hidden shadow-2xl relative flex flex-col max-h-[90vh]">
-        {/* Header decoration */}
-        <div className="absolute top-0 inset-x-0 h-1.5 bg-gradient-to-r from-sky-500 via-amber-500 to-emerald-500" />
-        
-        {/* Close Button */}
-        {paymentStep !== "processing" && (
+      <div className="w-full max-w-2xl bg-ink-950 border border-white/10 rounded-2xl overflow-hidden shadow-2xl relative flex flex-col max-h-[90vh]">
+        <div className="absolute top-0 inset-x-0 h-1.5 bg-gradient-to-r from-sky-500 via-gold-500 to-emerald-500" />
+
+        {step !== "processing" && (
           <button
-            onClick={paymentStep === "success" ? handleReset : onClose}
-            className="absolute top-4 right-4 p-1.5 hover:bg-white/10 rounded-lg text-white/50 hover:text-white transition-colors z-10"
+            onClick={step === "success" ? reset : onClose}
+            className="absolute top-4 right-4 p-1.5 hover:bg-white/10 rounded-lg text-white/50 hover:text-white transition-colors z-10 cursor-pointer"
+            aria-label="Close"
           >
             <X className="w-5 h-5" />
           </button>
         )}
 
-        {paymentStep === "plans" && (
+        {step === "plans" && (
           <div className="overflow-y-auto flex-1 p-6 md:p-8">
             <div className="text-center max-w-lg mx-auto">
-              <span className="text-[10px] uppercase tracking-widest text-amber-500 font-bold bg-amber-500/10 px-3 py-1 rounded-full">
-                ✨ High Altitude Access
+              <span className="text-[10px] uppercase tracking-widest text-gold-500 font-bold bg-gold-500/10 px-3 py-1 rounded-full">
+                Unlock the people behind your trek
               </span>
               <h3 className="text-2xl md:text-3xl font-bold font-serif text-white mt-3">
-                Unlock Verified Guide Contact
+                Verified local contacts, zero commission
               </h3>
               <p className="text-white/60 text-xs mt-2">
-                Get direct access to local coordinators, bypass expensive travel agencies, and plan your Himalayan trek with local safety experts.
+                Talk directly to the guides and drivers who run your route. You negotiate,
+                you pay them — we never take a cut.
               </p>
             </div>
 
-            {/* Plan Comparison Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-8">
-              {/* Single Unlock */}
-              <div
-                onClick={() => setSelectedPlan("single")}
-                className={`cursor-pointer p-5 rounded-xl border transition-all duration-300 flex flex-col justify-between ${
-                  selectedPlan === "single"
-                    ? "bg-slate-900 border-amber-500/80 shadow-md shadow-amber-500/5"
-                    : "bg-slate-900/40 border-white/5 hover:border-white/15"
-                }`}
-              >
-                <div>
-                  <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-white/60 uppercase">Single Unlock</span>
-                    {selectedPlan === "single" && (
-                      <span className="w-4 h-4 rounded-full bg-amber-500 flex items-center justify-center">
-                        <Check className="w-3 h-3 text-slate-950 stroke-[3]" />
-                      </span>
+              {(["single", "premium"] as const).map((planKey) => {
+                const plan = PLANS[planKey];
+                const active = selectedPlan === planKey;
+                return (
+                  <div
+                    key={planKey}
+                    onClick={() => setSelectedPlan(planKey)}
+                    className={`cursor-pointer p-5 rounded-xl border relative transition-all duration-300 flex flex-col justify-between overflow-hidden ${
+                      active
+                        ? "bg-ink-900 border-gold-500/80 shadow-md shadow-gold-500/5"
+                        : "bg-ink-900/40 border-white/5 hover:border-white/15"
+                    }`}
+                  >
+                    {planKey === "premium" && (
+                      <div className="absolute top-0 right-0 bg-gold-500 text-ink-950 font-bold text-[8px] uppercase tracking-wider px-3 py-1 rounded-bl-lg">
+                        Recommended
+                      </div>
                     )}
+                    <div>
+                      <div className="flex justify-between items-start">
+                        <span className={`text-xs font-bold uppercase ${planKey === "premium" ? "text-gold-500" : "text-white/60"}`}>
+                          {planKey === "premium" ? "Premium DIY" : "Single Unlock"}
+                        </span>
+                        {active && (
+                          <span className="w-4 h-4 rounded-full bg-gold-500 flex items-center justify-center">
+                            <Check className="w-3 h-3 text-ink-950 stroke-[3]" />
+                          </span>
+                        )}
+                      </div>
+                      <h4 className="text-lg font-bold text-white mt-1">
+                        {planKey === "premium" ? "Unlimited Planning Account" : "One Route & Guide"}
+                      </h4>
+                      <ul className="mt-5 space-y-2.5 text-xs text-white/80">
+                        {plan.perks.map((perk) => (
+                          <li key={perk.text} className="flex items-start gap-2">
+                            <perk.icon className={`w-4 h-4 shrink-0 mt-0.5 ${perk.highlight ? "text-gold-300" : "text-gold-500"}`} />
+                            <span className={perk.highlight ? "text-gold-300/90 font-medium" : ""}>{perk.text}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="mt-6 pt-4 border-t border-white/5">
+                      <div className={`text-2xl font-serif font-bold ${planKey === "premium" ? "text-gold-400" : "text-white"}`}>
+                        {plan.label}
+                        <span className="text-[10px] font-sans font-normal text-white/45">
+                          {planKey === "premium" ? " / year" : " / contact"}
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                  <h4 className="text-lg font-bold text-white mt-1">Single Route & Guide</h4>
-                  <p className="text-white/50 text-[11px] mt-1">Great for a single fixed holiday plan.</p>
-                  
-                  <ul className="mt-5 space-y-2.5 text-xs text-white/80">
-                    <li className="flex items-start gap-2">
-                      <PhoneCall className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <span>1 Verified Guide WhatsApp & Phone contact</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <Map className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <span>Custom GPX file & itinerary download</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <Award className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <span>Local permit contact & instructions</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                      <span className="text-amber-400/90 font-medium">48h response guarantee: no response = credit back</span>
-                    </li>
-                  </ul>
-                </div>
-
-                <div className="mt-6 pt-4 border-t border-white/5">
-                  <div className="text-2xl font-serif font-bold text-white">
-                    ₹499 <span className="text-[10px] font-sans font-normal text-white/45">/ route</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Premium DIY */}
-              <div
-                onClick={() => setSelectedPlan("premium")}
-                className={`cursor-pointer p-5 rounded-xl border relative transition-all duration-300 flex flex-col justify-between overflow-hidden ${
-                  selectedPlan === "premium"
-                    ? "bg-gradient-to-b from-slate-900 to-slate-950 border-amber-500 shadow-lg shadow-amber-500/10"
-                    : "bg-slate-900/40 border-white/5 hover:border-white/15"
-                }`}
-              >
-                {/* Popular Pill */}
-                <div className="absolute top-0 right-0 bg-amber-500 text-slate-950 font-bold text-[8px] uppercase tracking-wider px-3 py-1 rounded-bl-lg">
-                  Recommended
-                </div>
-
-                <div>
-                  <div className="flex justify-between items-start">
-                    <span className="text-xs font-bold text-amber-500 uppercase flex items-center gap-1">
-                      <Sparkles className="w-3.5 h-3.5 fill-amber-500" /> Premium DIY
-                    </span>
-                    {selectedPlan === "premium" && (
-                      <span className="w-4 h-4 rounded-full bg-amber-500 flex items-center justify-center">
-                        <Check className="w-3 h-3 text-slate-950 stroke-[3]" />
-                      </span>
-                    )}
-                  </div>
-                  <h4 className="text-lg font-bold text-white mt-1">Unlimited Planning Account</h4>
-                  <p className="text-white/50 text-[11px] mt-1">For regular trekkers and mountain explorers.</p>
-                  
-                  <ul className="mt-5 space-y-2.5 text-xs text-white/80">
-                    <li className="flex items-start gap-2">
-                      <PhoneCall className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <span><strong>5 Local Guide</strong> contacts unlocked</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <Sparkles className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <span>Unlimited AI planning questions & chat</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <Map className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <span>PDF, GPX downloads & custom route edits</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <Award className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <span>Direct altitude coaching & gear checklists</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                      <span className="text-amber-400/90 font-medium">48h response guarantee: no response = credit back</span>
-                    </li>
-                  </ul>
-                </div>
-
-                <div className="mt-6 pt-4 border-t border-white/5">
-                  <div className="text-2xl font-serif font-bold text-amber-500">
-                    ₹1,499 <span className="text-[10px] font-sans font-normal text-white/45">/ full access</span>
-                  </div>
-                </div>
-              </div>
+                );
+              })}
             </div>
 
-            {/* Bottom Actions */}
-            <div className="mt-8 border-t border-white/10 pt-5 flex flex-col md:flex-row items-center justify-between gap-4">
+            {error && (
+              <div className="mt-5 text-[12px] text-rose-300 font-medium bg-rose-500/10 border border-rose-500/20 rounded-xl px-4 py-3 flex items-start gap-2">
+                <MessageSquareText className="w-4 h-4 shrink-0 mt-0.5" /> {error}
+              </div>
+            )}
+
+            <div className="mt-6 border-t border-white/10 pt-5 flex flex-col md:flex-row items-center justify-between gap-4">
               <span className="text-[10px] text-white/40 max-w-sm text-center md:text-left flex items-start gap-1">
-                <ShieldAlert className="w-3.5 h-3.5 text-amber-500/60 shrink-0 mt-0.5" />
-                Payments are securely processed via Razorpay. Guides are WFR certified and verified by Blue Sheep Adventures.
+                <ShieldAlert className="w-3.5 h-3.5 text-gold-500/60 shrink-0 mt-0.5" />
+                Payments securely processed by Razorpay (UPI, cards, netbanking).
+                Every listed provider is identity-verified with signed consent.
               </span>
               <button
                 onClick={handlePayment}
-                className="w-full md:w-auto px-6 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 transition-all duration-200 cursor-pointer shadow-lg shadow-amber-500/10 shrink-0"
+                className="w-full md:w-auto px-6 py-3 rounded-xl bg-gold-500 hover:bg-gold-400 text-ink-950 font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg shadow-gold-500/10 shrink-0"
               >
                 <CreditCard className="w-4 h-4" />
-                Pay {selectedPlan === "premium" ? "₹1,499" : "₹499"} Now
+                Pay {PLANS[selectedPlan].label} now
               </button>
             </div>
           </div>
         )}
 
-        {paymentStep === "processing" && (
+        {step === "processing" && (
           <div className="p-10 flex flex-col items-center justify-center text-center flex-1">
-            <div className="w-16 h-16 border-4 border-amber-500/20 border-t-amber-500 rounded-full animate-spin mb-6" />
-            <h4 className="text-lg font-bold text-white">Opening Razorpay Checkout</h4>
+            <div className="w-16 h-16 border-4 border-gold-500/20 border-t-gold-500 rounded-full animate-spin mb-6" />
+            <h4 className="text-lg font-bold text-white">Opening Razorpay checkout…</h4>
             <p className="text-white/50 text-xs mt-2 max-w-xs">
-              Connecting securely to process payment of {selectedPlan === "premium" ? "₹1,499" : "₹499"}. Please do not reload.
+              Complete the payment in the Razorpay window. Don't reload this page.
             </p>
           </div>
         )}
 
-        {paymentStep === "success" && (
+        {step === "success" && (
           <div className="p-8 md:p-10 flex flex-col items-center justify-center text-center flex-1">
             <div className="w-16 h-16 bg-emerald-500/20 border border-emerald-500/30 rounded-full flex items-center justify-center mb-6">
               <Check className="w-8 h-8 text-emerald-400 stroke-[2.5]" />
             </div>
-            <h3 className="text-xl md:text-2xl font-serif font-bold text-white">
-              Payment Successful!
-            </h3>
+            <h3 className="text-xl md:text-2xl font-serif font-bold text-white">Payment successful!</h3>
             <p className="text-white/60 text-xs mt-2 max-w-md">
-              Congratulations! Your DIY Trek planning access is now unlocked. You have full access to custom itineraries and guide details.
+              {paidType === "premium"
+                ? "Premium is active: unlimited AI chat, itinerary editing, and 5 guide unlock credits on your account."
+                : "Your unlock is ready — it will be applied to the guide you choose."}
             </p>
 
-            {/* Unlocked Details Info Card */}
-            <div className="w-full max-w-md bg-white/5 border border-white/5 rounded-xl p-4 mt-6 text-left">
-              <span className="text-[10px] uppercase font-bold tracking-widest text-emerald-400">Unlocked Contact</span>
-              <div className="flex justify-between items-center mt-2">
-                <div>
-                  <h5 className="text-white text-sm font-bold">Rigzin Dorje</h5>
-                  <p className="text-white/40 text-[10px]">Certified Mountain Guide (Markha Valley)</p>
+            {unlocked && (
+              <div className="w-full max-w-md bg-white/5 border border-white/5 rounded-xl p-4 mt-6 text-left">
+                <span className="text-[10px] uppercase font-bold tracking-widest text-emerald-400">
+                  Unlocked contact
+                </span>
+                <div className="flex justify-between items-center mt-2 gap-3">
+                  <div className="min-w-0">
+                    <h5 className="text-white text-sm font-bold truncate">{unlocked.name}</h5>
+                    <p className="text-white/60 text-xs mt-0.5 font-mono">{unlocked.phone}</p>
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    <a
+                      href={`tel:${unlocked.phone.replace(/\s/g, "")}`}
+                      className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-ink-950 font-bold text-xs rounded-lg transition-colors"
+                    >
+                      Call
+                    </a>
+                    <a
+                      href={`https://wa.me/${unlocked.phone.replace(/[^\d]/g, "")}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-lg transition-colors"
+                    >
+                      WhatsApp
+                    </a>
+                  </div>
                 </div>
-                <a 
-                  href="tel:+919876543210" 
-                  className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-lg transition-colors"
-                >
-                  Call Guide
-                </a>
               </div>
-              <div className="mt-3 pt-3 border-t border-white/5 flex justify-between text-[11px]">
-                <span className="text-white/60">Phone: <strong>+91 98765 43210</strong></span>
-                <span className="text-white/60">WhatsApp: <strong>Available</strong></span>
-              </div>
-            </div>
+            )}
 
             <button
-              onClick={handleReset}
-              className="mt-8 px-6 py-2.5 bg-white text-slate-950 hover:bg-white/95 font-bold text-xs rounded-xl transition-all duration-200"
+              onClick={reset}
+              className="mt-8 px-6 py-2.5 bg-white text-ink-950 hover:bg-white/95 font-bold text-xs rounded-xl transition-all cursor-pointer"
             >
-              Return to Planner
+              Back to planning
             </button>
           </div>
         )}

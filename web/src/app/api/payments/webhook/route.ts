@@ -10,16 +10,18 @@ export async function POST(req: NextRequest) {
     const signature = req.headers.get("x-razorpay-signature");
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
 
-    // Verify signature if webhook secret is configured
-    if (webhookSecret && signature) {
+    // Signature is MANDATORY whenever a secret is configured; in production a
+    // missing secret refuses the webhook outright.
+    if (webhookSecret && !webhookSecret.includes("your")) {
       const expectedSignature = crypto
         .createHmac("sha256", webhookSecret)
         .update(bodyText)
         .digest("hex");
-
-      if (expectedSignature !== signature) {
+      if (!signature || expectedSignature !== signature) {
         return NextResponse.json({ error: "Signature verification failed" }, { status: 400 });
       }
+    } else if (process.env.NODE_ENV === "production") {
+      return NextResponse.json({ error: "Webhook secret not configured" }, { status: 503 });
     }
 
     const eventData = JSON.parse(bodyText);
