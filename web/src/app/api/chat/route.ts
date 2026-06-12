@@ -294,13 +294,14 @@ export async function POST(req: NextRequest) {
   let ragContext = "";
   if (client) {
     try {
+      // NVIDIA extension params go at TOP LEVEL: openai-node passes unknown
+      // body fields through verbatim (it has no Python-style extra_body merge)
       const embed = await client.embeddings.create({
         model: EMBEDDING_MODEL,
         input: message,
         encoding_format: "float",
-        // @ts-expect-error NVIDIA extension
-        extra_body: { input_type: "query" },
-      });
+        input_type: "query",
+      } as any);
       const chunks = await db.matchChunks(embed.data[0].embedding as number[]);
       ragContext = chunks.join("\n\n");
     } catch (e) {
@@ -330,7 +331,7 @@ ${ragContext || "No verified route records were retrieved for this query. If the
             temperature: 1.0,
             top_p: 0.95,
             stream: true,
-            extra_body: { chat_template_kwargs: { enable_thinking: false } },
+            chat_template_kwargs: { enable_thinking: false },
           } as any)) as unknown as AsyncIterable<{ choices: { delta?: { content?: string } }[] }>;
           for await (const chunk of completion) {
             const t = chunk.choices[0]?.delta?.content ?? "";
@@ -377,9 +378,7 @@ ${ragContext || "No verified route records were retrieved for this query. If the
                   type: "json_schema",
                   json_schema: { name: "itinerary", schema: ITINERARY_SCHEMA },
                 },
-                extra_body: {
-                  chat_template_kwargs: { enable_thinking: false },
-                },
+                chat_template_kwargs: { enable_thinking: false },
               } as any)) as { choices: { message?: { content?: string } }[] };
               content = JSON.parse(completion.choices[0]?.message?.content ?? "null");
             } catch (e) {
