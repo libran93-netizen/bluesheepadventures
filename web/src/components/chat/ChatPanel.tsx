@@ -7,6 +7,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { X, Send, Sparkles, ShieldCheck, Info } from "lucide-react";
 import ItineraryCard, { ItineraryPayload } from "./ItineraryCard";
 import PaywallModal from "./PaywallModal";
+import { BASE_PATH } from "@/lib/basePath";
 
 interface Message {
   id: string;
@@ -69,7 +70,7 @@ export default function ChatPanel({ isOpen, onClose, initialMessage }: ChatPanel
     setValidationError("");
 
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch(`${BASE_PATH}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, sessionId, pendingLead }),

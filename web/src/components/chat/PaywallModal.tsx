@@ -8,6 +8,7 @@
 
 import React, { useEffect, useState } from "react";
 import { X, Check, CreditCard, Sparkles, Map, PhoneCall, ShieldAlert, Award, MessageSquareText } from "lucide-react";
+import { BASE_PATH } from "@/lib/basePath";
 
 declare global {
   interface Window {
@@ -93,7 +94,7 @@ export default function PaywallModal({ isOpen, onClose, sessionId, providerId }:
 
     try {
       const plan = PLANS[selectedPlan];
-      const orderRes = await fetch("/api/payments/create-order", {
+      const orderRes = await fetch(`${BASE_PATH}/api/payments/create-order`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: plan.type, sessionId }),
@@ -113,7 +114,7 @@ export default function PaywallModal({ isOpen, onClose, sessionId, providerId }:
         modal: { ondismiss: () => setStep("plans") },
         handler: async (resp: any) => {
           try {
-            const verifyRes = await fetch("/api/payments/verify", {
+            const verifyRes = await fetch(`${BASE_PATH}/api/payments/verify`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -128,7 +129,7 @@ export default function PaywallModal({ isOpen, onClose, sessionId, providerId }:
             setPaidType(verified.type);
 
             if (providerId) {
-              const unlockRes = await fetch("/api/providers/unlock", {
+              const unlockRes = await fetch(`${BASE_PATH}/api/providers/unlock`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ providerId, sessionId }),
