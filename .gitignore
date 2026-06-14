@@ -1,0 +1,17 @@
+# Editor / IDE caches
+.claude/
+.gemini/
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
